@@ -71,52 +71,6 @@ def plot_and_save_confidence_distribution(confidence_data, iteration, output_dir
     plt.close()
     tqdm.write(f"[INFO] Confidence distribution plot saved to: {save_path}")
 
-# def update_and_manage_gaussians(gaussians, render_pkg, soft_mask, core_mask, rewards):
-#     """
-#     【最终修复】此函数现在只负责更新置信度，移除了不稳定且多余的剪枝逻辑。
-#     剪枝操作将完全由 gaussian_model.py 中的 densify_and_prune 函数统一管理。
-#     """
-#     with torch.no_grad():
-#         visibility_filter = render_pkg["visibility_filter"]
-#         xy_proj = render_pkg["viewspace_points"]
-#
-#         # 使用我们之前修复的、最稳健的索引方式
-#         visible_indices = visibility_filter.nonzero(as_tuple=True)[0]
-#         if visible_indices.numel() == 0:
-#             return
-#
-#         xy_idx_float = xy_proj[visible_indices, :2]
-#         H, W = soft_mask.shape
-#
-#         valid_coords_mask = (xy_idx_float[:, 0] >= 0) & (xy_idx_float[:, 0] < W) & \
-#                             (xy_idx_float[:, 1] >= 0) & (xy_idx_float[:, 1] < H)
-#
-#         _in_image_indices_absolute = visible_indices[valid_coords_mask]
-#         if _in_image_indices_absolute.numel() == 0:
-#             return
-#
-#         in_image_indices_absolute = _in_image_indices_absolute.contiguous()
-#         valid_xy_float = xy_proj[in_image_indices_absolute, :2]
-#
-#         valid_xy = torch.empty_like(valid_xy_float, dtype=torch.long)
-#         valid_xy[:, 0] = torch.clamp(valid_xy_float[:, 0], 0, W - 1).long()
-#         valid_xy[:, 1] = torch.clamp(valid_xy_float[:, 1], 0, H - 1).long()
-#
-#         current_confidence = gaussians.get_roi_confidence
-#
-#         is_in_soft_mask = soft_mask[valid_xy[:, 1], valid_xy[:, 0]].bool()
-#         is_in_core_mask = core_mask[valid_xy[:, 1], valid_xy[:, 0]].bool()
-#
-#         # 惩罚
-#         current_confidence[in_image_indices_absolute[~is_in_soft_mask]] -= rewards['penalty']
-#         # 奖励
-#         current_confidence[in_image_indices_absolute[is_in_soft_mask]] += rewards['standard']
-#         # 额外奖励
-#         current_confidence[in_image_indices_absolute[is_in_core_mask]] += rewards['core_bonus']
-#
-#         # 将置信度限制在合理范围
-#         torch.clamp(current_confidence, min=-10.0, max=10.0, out=current_confidence)
-
 def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, tb_writer, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     scene = Scene(dataset, shuffle=False)

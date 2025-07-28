@@ -93,8 +93,6 @@ class Scene:
             dim=0,
         )
 
-        # 【删除】不再需要生成静态3D掩码
-        # self.roi_mask_3d = generate_body_mask(self.vol_gt, BODY_THRESHOLD)
 
     def save(self, iteration, queryfunc):
         point_cloud_path = osp.join(
