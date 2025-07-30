@@ -65,18 +65,23 @@ class GaussianModel:
         )
 
     def restore(self, model_args, training_args):
+        # 【修改】增强了对旧版本checkpoint的兼容性提示
         if len(model_args) == 9:
             (
                 self._xyz, self._scaling, self._rotation, self._density,
                 self.max_radii2D, xyz_gradient_accum, denom, opt_dict, self.spatial_lr_scale,
             ) = model_args
+            # 旧的checkpoint没有保存roi_confidence, 我们将其初始化为0
             self._roi_confidence = torch.zeros((self._xyz.shape[0], 1), device=self._xyz.device)
-            print("旧的Checkpoint被加载，ROI置信度已初始化为0。")
+            print("\n[警告] 加载了不包含ROI置信度的旧版本Checkpoint。")
+            print("所有点的ROI置信度已安全地初始化为0。\n")
         else:
             (
                 self._xyz, self._scaling, self._rotation, self._density, self._roi_confidence,
                 self.max_radii2D, xyz_gradient_accum, denom, opt_dict, self.spatial_lr_scale,
             ) = model_args
+            print(f"\n成功从Checkpoint加载了 {self._xyz.shape[0]} 个点，包含ROI置信度信息。\n")
+
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -155,41 +160,63 @@ class GaussianModel:
 
     def update_roi_confidence(self, render_pkg, viewpoint_cam, standard_reward, core_bonus_reward, background_reward):
         """
-        【V5.0 决定性诊断版】探查 xy_proj 的坐标范围，并恢复分类计数。
+        【V6.0 最终修复版】
+        不再信任来自渲染管线的'viewspace_points'，而是在函数内部手动、可靠地重投影。
+        这可以保证无论渲染器实现如何，我们的ROI分类总是基于正确的2D坐标。
         """
         with torch.no_grad():
             if not hasattr(viewpoint_cam, 'soft_mask') or not hasattr(viewpoint_cam, 'core_mask'):
                 return
 
+            # --- 步骤 1: 获取必要数据 ---
             H_img, W_img = viewpoint_cam.image_height, viewpoint_cam.image_width
             soft_mask = viewpoint_cam.soft_mask.to(self.get_xyz.device)
             core_mask = viewpoint_cam.core_mask.to(self.get_xyz.device)
-
             visibility_filter = render_pkg["visibility_filter"]
-            xy_proj = render_pkg["viewspace_points"]
 
+            # 获取所有可见点的绝对索引
             visible_indices = visibility_filter.nonzero(as_tuple=True)[0]
             if visible_indices.numel() == 0:
                 return
 
-            valid_xy_float = xy_proj[visible_indices, :2]
+            # 获取这些可见点的3D世界坐标
+            visible_xyz_world = self._xyz[visible_indices]
 
-            # --- 【V5.0 核心诊断探针】 ---
+            # --- 步骤 2: 可靠的3D到2D重投影 ---
+            # 从相机获取完整的投影变换矩阵 (World -> NDC)
+            P = viewpoint_cam.full_proj_transform.cuda()
+
+            # 将3D世界坐标点转换为齐次坐标 (N, 4)
+            points_homogeneous = torch.cat(
+                [visible_xyz_world, torch.ones(visible_xyz_world.shape[0], 1, device="cuda")], dim=1)
+
+            # 应用投影变换 (N, 4)
+            points_clip = points_homogeneous @ P.T
+
+            # 执行透视除法，得到归一化设备坐标 (NDC) (N, 3)
+            # 我们只关心x, y。加上一个极小值避免除以0。
+            points_ndc = points_clip[..., :2] / (points_clip[..., 3:4] + 1e-8)
+
+            # 将NDC坐标 [-1, 1] 转换为像素坐标 [0, W-1] 和 [0, H-1]
+            # x_pix = (x_ndc + 1) * W / 2
+            # y_pix = (y_ndc + 1) * H / 2
+            # 注意：在3DGS中，Y轴通常是向下的，所以是 (1 - y_ndc)
+            reliable_xy_proj = torch.zeros_like(points_ndc)
+            reliable_xy_proj[:, 0] = (points_ndc[:, 0] + 1.0) * W_img / 2.0
+            reliable_xy_proj[:, 1] = (1.0 - points_ndc[:, 1]) * H_img / 2.0  # Y轴翻转
+
+            # --- 步骤 3: 使用可靠的2D坐标进行后续操作 ---
+            valid_xy_float = reliable_xy_proj
+
+            # 诊断探针现在应该会显示正确的范围了
             if not hasattr(self, "final_probe_printed"):
-                print("\n--- [决定性诊断探针 v5.0] ---")
-                print(f"  -> 探查 'xy_proj' (viewspace_points) 的坐标范围:")
+                print("\n--- [决定性诊断探针 v6.0 - 可靠重投影] ---")
                 min_x, max_x = valid_xy_float[:, 0].min(), valid_xy_float[:, 0].max()
                 min_y, max_y = valid_xy_float[:, 1].min(), valid_xy_float[:, 1].max()
+                print(f"  -> 探查 'reliable_xy_proj' 的坐标范围:")
                 print(f"  -> X 范围: [{min_x:.4f}, {max_x:.4f}]")
                 print(f"  -> Y 范围: [{min_y:.4f}, {max_y:.4f}]")
-                if max_x <= 1.0 and min_x >= -1.0 and max_y <= 1.0 and min_y >= -1.0:
-                    print("  -> [结论] 'xy_proj' 似乎已经是归一化坐标 [-1, 1]。")
-                elif max_x > 1.0 or max_y > 1.0:
-                    print(f"  -> [结论] 'xy_proj' 似乎是像素坐标 [0, {W_img - 1}]。")
-                else:
-                    print("  -> [结论] 'xy_proj' 坐标范围未知。")
-                self.final_probe_printed = True  # 确保只打印一次
-            # --- 【诊断结束】 ---
+                self.final_probe_printed = True
 
             # 使用图像尺寸进行过滤
             valid_coords_mask = (valid_xy_float[:, 0] >= 0) & (valid_xy_float[:, 0] < W_img) & \
@@ -201,32 +228,32 @@ class GaussianModel:
 
             final_valid_xy = valid_xy_float[valid_coords_mask]
 
+            # --- 步骤 4: 采样和分类 (这部分逻辑不变) ---
             soft_mask_for_sampling = soft_mask.unsqueeze(0).unsqueeze(0)
             core_mask_for_sampling = core_mask.unsqueeze(0).unsqueeze(0)
 
-            # 归一化
+            # 归一化用于grid_sample
             normalized_xy = torch.zeros_like(final_valid_xy)
             normalized_xy[:, 0] = (final_valid_xy[:, 0] / (W_img - 1)) * 2 - 1
             normalized_xy[:, 1] = (final_valid_xy[:, 1] / (H_img - 1)) * 2 - 1
             grid = normalized_xy.unsqueeze(0).unsqueeze(0)
 
             # 采样
-            sampled_soft_values = torch.nn.functional.grid_sample(soft_mask_for_sampling, grid, mode='nearest',
-                                                                  padding_mode='zeros', align_corners=True)
-            sampled_core_values = torch.nn.functional.grid_sample(core_mask_for_sampling, grid, mode='nearest',
-                                                                  padding_mode='zeros', align_corners=True)
+            sampled_soft_values = torch.nn.functional.grid_sample(soft_mask_for_sampling, grid, mode='bilinear',
+                                                                  padding_mode='zeros', align_corners=True).squeeze()
+            sampled_core_values = torch.nn.functional.grid_sample(core_mask_for_sampling, grid, mode='bilinear',
+                                                                  padding_mode='zeros', align_corners=True).squeeze()
 
-            is_in_soft_mask = sampled_soft_values.squeeze() > 0.5
-            is_in_core_mask = sampled_core_values.squeeze() > 0.5
+            # 使用您设定的阈值进行分类
+            is_in_soft_mask = sampled_soft_values > 0.07  # 软区阈值
+            is_in_core_mask = sampled_core_values > 0.08  # 核心区阈值
 
-            # 分类
             indices_in_core = in_image_indices_absolute[is_in_core_mask]
             is_in_soft_only = is_in_soft_mask & ~is_in_core_mask
             indices_in_soft_only = in_image_indices_absolute[is_in_soft_only]
             is_background = ~is_in_soft_mask
             indices_background = in_image_indices_absolute[is_background]
 
-            # 恢复分类计数打印
             if hasattr(self, "final_probe_printed") and not hasattr(self, "final_count_printed"):
                 print(
                     f"  -> [分类计数] 核心: {indices_in_core.numel()}, 软区: {indices_in_soft_only.numel()}, 背景: {indices_background.numel()}")

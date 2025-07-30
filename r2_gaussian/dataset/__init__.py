@@ -92,6 +92,11 @@ class Scene:
             ],
             dim=0,
         )
+        self.grid_center = torch.tensor(self.scanner_cfg["offOrigin"], dtype=torch.float32)
+        sVoxel = torch.tensor(self.scanner_cfg["sVoxel"], dtype=torch.float32)
+        nVoxel = torch.tensor(self.scanner_cfg["nVoxel"], dtype=torch.float32)
+        self.voxel_size = sVoxel / nVoxel
+        print("FDK体积和坐标转换信息已准备好。")
 
 
     def save(self, iteration, queryfunc):

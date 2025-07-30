@@ -53,22 +53,13 @@ class OptimizationParams(ParamGroup):
         self.lambda_tv = 0.05
         self.lambda_shape = 0.0
 
-        # self.roi_management_interval = 100
-        # self.roi_prune_threshold = -3.0  # 这个参数现在不再直接用于剪枝，但可以保留用于未来可能的其他逻辑
-        # self.roi_protect_threshold = 0.8
-        # # 【新增】定义“候选浮点”阶层的置信度上限，这是我们分层策略的关键阈值
-        # self.roi_candidate_threshold = 0.2
-        # self.roi_penalty = 0.01
-        # self.roi_standard_reward = 0.05
-        # self.roi_core_bonus_reward = 0.1
+        self.intelligent_confidence_threshold = 0.07
 
         self.roi_management_interval = 100
         self.roi_prune_threshold = -3.0
         self.roi_protect_threshold = 0.8
         self.roi_candidate_threshold = 0.2
-        # 【修改】移除旧的惩罚项，添加新的背景奖励项
-        # self.roi_penalty = 0.01  <- 注释或删除此行
-        self.roi_background_reward = 0.01  # 为背景点提供一个微小的正向激励
+        self.roi_background_reward = -0.05  # 为背景点提供一个微小的正向激励
         self.roi_standard_reward = 0.05
         self.roi_core_bonus_reward = 0.1
 

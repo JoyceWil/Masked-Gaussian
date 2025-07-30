@@ -13,7 +13,7 @@ POINT_CLOUD_FILE = "/media/data2/hezhipeng/synthetic_dataset/cone_ntrain_25_angl
 OUTPUT_DIR = Path('/home/hezhipeng/Workbench/r2_gaussian-main/output/pointcloud_threshold_previews/')
 
 # 要测试的密度阈值
-THRESHOLDS = [0.01, 0.03, 0.05, 0.08, 0.1, 0.15, 0.2]
+THRESHOLDS = [0.01, 0.03, 0.05, 0.06, 0.07, 0.08, 0.1]
 
 # 生成的预览图大小 (像素)
 IMG_SIZE = 512

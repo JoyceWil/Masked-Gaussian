@@ -87,7 +87,57 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     scale_bound = np.array([dataset.scale_min, dataset.scale_max]) * volume_to_world if dataset.scale_min and dataset.scale_max else None
     queryfunc = lambda x: query(x, scanner_cfg["offOrigin"], scanner_cfg["nVoxel"], scanner_cfg["sVoxel"], pipe)
     gaussians = GaussianModel(scale_bound)
+
     initialize_gaussian(gaussians, dataset, None)
+
+    if opt.intelligent_confidence_threshold > 0:
+        print(f"\n--- [智能置信度初始化] ---")
+        print(f"正在为初始点云赋予ROI置信度奖励，FDK密度阈值: {opt.intelligent_confidence_threshold}")
+        with torch.no_grad():
+            # 获取所有初始点的世界坐标
+            initial_xyz = gaussians.get_xyz
+
+            # 从scene对象获取FDK体积和坐标转换信息
+            fdk_volume = scene.vol_gt.to(initial_xyz.device)
+            grid_center = scene.grid_center.to(initial_xyz.device)
+            voxel_size = scene.voxel_size.to(initial_xyz.device)
+            grid_dims = torch.tensor(fdk_volume.shape, device=initial_xyz.device)
+
+            # 将世界坐标转换为FDK体积的网格索引
+            relative_coords = initial_xyz - grid_center
+            grid_indices = torch.round((relative_coords / voxel_size) + (grid_dims / 2.0)).long()
+
+            # 筛选出在FDK体积内的点
+            valid_mask = (grid_indices[:, 2] >= 0) & (grid_indices[:, 2] < grid_dims[0]) & \
+                         (grid_indices[:, 1] >= 0) & (grid_indices[:, 1] < grid_dims[1]) & \
+                         (grid_indices[:, 0] >= 0) & (grid_indices[:, 0] < grid_dims[2])
+
+            absolute_indices_of_valid_points = torch.where(valid_mask)[0]
+            valid_grid_indices = grid_indices[valid_mask]
+
+            if absolute_indices_of_valid_points.numel() > 0:
+                # 查询这些点在FDK体积中的密度值
+                point_densities = fdk_volume[
+                    valid_grid_indices[:, 2],  # Z
+                    valid_grid_indices[:, 1],  # Y
+                    valid_grid_indices[:, 0]  # X
+                ]
+
+                # 找到密度高于我们设定阈值的点
+                core_points_mask = point_densities > opt.intelligent_confidence_threshold
+                target_indices = absolute_indices_of_valid_points[core_points_mask]
+
+                # 为这些“核心点”赋予初始奖励
+                # 我们使用 roi_core_bonus_reward 作为这个奖励值
+                initial_reward = opt.roi_core_bonus_reward
+                gaussians._roi_confidence[target_indices] = initial_reward
+
+                print(
+                    f"操作完成: {target_indices.numel()} / {initial_xyz.shape[0]} 个点被识别为核心点，并赋予了 {initial_reward:.2f} 的初始置信度。")
+            else:
+                print("警告: 没有一个初始点落在FDK体积内，无法进行智能置信度初始化。")
+        print(f"--- [初始化结束] ---\n")
+
     scene.gaussians = gaussians
     gaussians.training_setup(opt)
     if checkpoint is not None:
