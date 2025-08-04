@@ -19,6 +19,7 @@ from r2_gaussian.dataset import Scene
 from r2_gaussian.utils.loss_utils import l1_loss, ssim, tv_3d_loss
 from r2_gaussian.utils.image_utils import metric_vol, metric_proj
 from r2_gaussian.utils.plot_utils import show_two_slice
+from r2_gaussian.utils.mask_generator import check_and_generate_masks
 
 
 def plot_and_save_confidence_distribution(confidence_data, iteration, output_dir, protect_threshold,
@@ -151,8 +152,11 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         tv_vol_size = opt.tv_vol_size
         tv_vol_nVoxel = torch.tensor([tv_vol_size, tv_vol_size, tv_vol_size], device=device)
         tv_vol_sVoxel = torch.tensor(scanner_cfg["dVoxel"], device=device, dtype=torch.float32) * tv_vol_nVoxel
-    use_shape_regularization = opt.lambda_shape > 0
-    if use_shape_regularization: print(f"Use shape regularization loss with lambda = {opt.lambda_shape}")
+
+    use_drop_gaussian = opt.drop_rate_gamma > 0 and opt.drop_rate_gamma <= 1
+    if use_drop_gaussian:
+        print(f"Use DropGaussian with gamma = {opt.drop_rate_gamma}, progressive until {opt.drop_progressive_until}")
+
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
     ckpt_save_path = osp.join(scene.model_path, "ckpt")
@@ -167,8 +171,32 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         if not viewpoint_stack: viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
         active_sh_indices = None
+        if use_drop_gaussian and iteration > 6000:
+            num_gaussians = gaussians.get_xyz.shape[0]
+            confidence = gaussians.get_roi_confidence.detach()
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe)
+            # 1. 计算总共要丢弃多少个点
+            progress = min(1.0, iteration / opt.drop_progressive_until)
+            current_drop_rate = opt.drop_rate_gamma * progress
+            num_to_drop = int(current_drop_rate * num_gaussians)
+
+            if num_to_drop > 0:
+                # 2. 根据置信度决定丢弃的优先级
+                # 置信度越低的点，越容易被丢弃。我们直接对置信度进行排序。
+                # a_i < a_j  =>  i is dropped before j
+                sorted_confidence, sorted_indices = torch.sort(confidence)
+
+                # 3. 选取置信度最低的 num_to_drop 个点的索引作为要被丢弃的索引
+                indices_to_drop = sorted_indices[:num_to_drop]
+
+                # 4. 创建一个保留点的掩码
+                keep_mask = torch.ones(num_gaussians, dtype=torch.bool, device="cuda")
+                keep_mask[indices_to_drop] = False
+
+                # 5. 从掩码得到要保留的点的索引
+                active_sh_indices = torch.where(keep_mask)[0]
+
+        render_pkg = render(viewpoint_cam, gaussians, pipe, active_sh_indices=active_sh_indices)
         image = render_pkg["render"]
         gt_image = viewpoint_cam.original_image.cuda()
         loss = {"total": 0.0}
@@ -199,8 +227,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         torch.cuda.synchronize()
         with torch.no_grad():
             if args.soft_mask_dir and args.core_mask_dir and iteration >= args.roi_update_start_iter and iteration % args.roi_management_interval == 0:
-                # 定义我们最终的激励方案参数
-                # 注意：我们不再使用旧的 rewards 字典
                 background_reward = opt.roi_background_reward if hasattr(opt,
                                                                          'roi_background_reward') else -opt.roi_penalty
 
@@ -215,8 +241,24 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             visibility_filter = render_pkg["visibility_filter"]
             radii = render_pkg["radii"]
             viewspace_point_tensor = render_pkg["viewspace_points"]
-            gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-            gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+            if active_sh_indices is not None:
+                # 创建一个完整大小的、全为 False 的掩码
+                full_visibility_filter = torch.zeros(gaussians.get_xyz.shape[0], dtype=torch.bool, device="cuda")
+                # 将可见点的索引设置为 True
+                full_visibility_filter[active_sh_indices[visibility_filter]] = True
+
+                # 更新 max_radii2D 时也需要使用映射
+                gaussians.max_radii2D[full_visibility_filter] = torch.max(
+                    gaussians.max_radii2D[full_visibility_filter], radii[visibility_filter]
+                )
+                gaussians.add_densification_stats(viewspace_point_tensor, full_visibility_filter)
+            else:
+                # 如果没有使用 drop, 行为和原来一样
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
+                                                                     radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
             if iteration < opt.densify_until_iter:
                 if (iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0):
                     # 【修改】将所有需要的阈值参数完整地传递给函数
@@ -327,8 +369,13 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--gpu_id", type=int, default=0, help="指定要使用的GPU ID")
     parser.add_argument("--plot_confidence", action="store_true", help="在训练结束时生成并保存置信度分布直方图。")
-    parser.add_argument("--roi_update_start_iter", type=int, default=5000,
-                        help="Iteration to start ROI confidence updates.")
+    parser.add_argument("--roi_update_start_iter", type=int, default=5000,help="Iteration to start ROI confidence updates.")
+    parser.add_argument('--auto_mask', action='store_true',help="如果设置此项，将自动检查并生成ROI掩码。")
+    parser.add_argument('--mask_soft_p', type=int, default=30,help="自动生成软组织掩码的百分位数。")
+    parser.add_argument('--mask_core_p', type=int, default=50,help="自动生成核心骨架掩码的百分位数。")
+    parser.add_argument('--no_previews', dest='save_previews', action='store_false',help="设置此项后，将不生成PNG格式的掩码预览图，只生成NPY文件。")
+    parser.set_defaults(save_previews=True)
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     args.test_iterations.append(1)
@@ -343,6 +390,36 @@ if __name__ == "__main__":
         print(f"Loading configuration file from {args.config}")
         cfg = load_config(args.config)
         for key in list(cfg.keys()): args_dict[key] = cfg[key]
+
+    if args.auto_mask:
+        print("\n--- [自动化ROI掩码处理模块] ---")
+        # 确保数据源路径已在配置中定义
+        if not hasattr(args, 'source_path') or not args.source_path:
+            print("错误: 必须在配置文件中定义 'source_path' 才能使用 --auto_mask。")
+            sys.exit(1)
+
+        try:
+            # 调用我们的生成器函数
+            soft_mask_dir, core_mask_dir = check_and_generate_masks(
+                source_path=args.source_path,
+                soft_p=args.mask_soft_p,
+                core_p=args.mask_core_p,
+                save_png_previews=args.save_previews
+            )
+
+            # 【关键步骤】: 动态更新args对象，将生成的路径注入到配置中
+            args.soft_mask_dir = soft_mask_dir
+            args.core_mask_dir = core_mask_dir
+
+            print("   - 配置已动态更新为使用以下NPY掩码目录:")
+            print(f"     - 软组织: {args.soft_mask_dir}")
+            print(f"     - 核心骨架: {args.core_mask_dir}")
+
+        except Exception as e:
+            print(f"错误：掩码生成失败: {e}")
+            print("训练已终止。")
+            sys.exit(1)
+        print("--- [掩码处理完毕] ---\n")
 
     tb_writer = prepare_output_and_logger(args)
     print("Optimizing " + args.model_path)

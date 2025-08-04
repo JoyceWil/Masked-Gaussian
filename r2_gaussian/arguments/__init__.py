@@ -51,7 +51,9 @@ class OptimizationParams(ParamGroup):
         self.rotation_lr_max_steps = 30_000
         self.lambda_dssim = 0.25
         self.lambda_tv = 0.05
-        self.lambda_shape = 0.0
+
+        self.drop_rate_gamma = 0.0  # 丢弃率的最大值，设为0则禁用
+        self.drop_progressive_until = 15000  # 丢弃率达到最大值所需的迭代次数
 
         self.intelligent_confidence_threshold = 0.07
 

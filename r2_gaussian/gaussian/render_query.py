@@ -1,4 +1,4 @@
-# r2_gaussian/gaussian/render_query.py (最终修复版)
+# r2_gaussian/gaussian/render_query.py (已集成DropGaussian)
 import sys
 import torch
 import math
@@ -23,6 +23,7 @@ def query(
         pipe: PipelineParams,
         scaling_modifier=1.0,
 ):
+    # query 函数不需要修改，保持原样
     voxel_settings = GaussianVoxelizationSettings(
         scale_modifier=scaling_modifier,
         nVoxel_x=int(nVoxel[0]), nVoxel_y=int(nVoxel[1]), nVoxel_z=int(nVoxel[2]),
@@ -53,8 +54,9 @@ def render(
         pc: GaussianModel,
         pipe: PipelineParams,
         scaling_modifier=1.0,
+        active_sh_indices=None,  # 【修改1】: 增加 active_sh_indices 参数，默认值为 None
 ):
-    # 准备一个张量来接收2D坐标。它的值会被CUDA内核覆盖。
+    # 准备一个与完整高斯点集大小相同的张量来接收2D坐标。
     screenspace_points = (
             torch.zeros_like(
                 pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda"
@@ -91,35 +93,45 @@ def render(
     )
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz
-    # 【关键】将全零的张量作为 means2D 传入
-    means2D = screenspace_points
-    density = pc.get_density
-    scales = pc.get_scaling
-    rotations = pc.get_rotation
-    cov3D_precomp = None
-    if pipe.compute_cov3D_python:
-        cov3D_precomp = pc.get_covariance(scaling_modifier)
+    # 【修改2】: 根据 active_sh_indices 是否存在，来决定使用全部高斯点还是子集
+    if active_sh_indices is not None:
+        # 如果提供了索引，就只选择这部分高斯点的属性进行渲染
+        means3D = pc.get_xyz[active_sh_indices]
+        means2D = screenspace_points[active_sh_indices] # 同样需要切片
+        density = pc.get_density[active_sh_indices]
+        scales = pc.get_scaling[active_sh_indices]
+        rotations = pc.get_rotation[active_sh_indices]
+        cov3D_precomp = None
+        if pipe.compute_cov3D_python:
+            # 注意: 如果使用预计算的协方差，也需要进行切片
+            cov3D_precomp = pc.get_covariance(scaling_modifier)[active_sh_indices]
+    else:
+        # 如果没有提供索引（例如在评估阶段），则使用全部高斯点
+        means3D = pc.get_xyz
+        means2D = screenspace_points
+        density = pc.get_density
+        scales = pc.get_scaling
+        rotations = pc.get_rotation
+        cov3D_precomp = None
+        if pipe.compute_cov3D_python:
+            cov3D_precomp = pc.get_covariance(scaling_modifier)
 
-    # --- 【最终的核心修复】 ---
-    # 假设 rasterizer 在原地修改了 means2D (即 screenspace_points)。
-    # 渲染器函数会返回渲染图像和每个高斯点的屏幕半径。
+    # 将准备好的数据传递给光栅化器
     rendered_image, radii = rasterizer(
         means3D=means3D,
-        means2D=means2D, # 这个张量会被CUDA内核直接修改
+        means2D=means2D,
         opacities=density,
         scales=scales,
         rotations=rotations,
         cov3D_precomp=cov3D_precomp,
     )
-    # --- 【修复结束】 ---
 
-
-    # 在返回时，我们使用被CUDA内核修改过的 screenspace_points 张量。
-    # 它现在包含了所有可见高斯点的真实2D坐标。
+    # 【修改3】: 返回的 visibility_filter 和 radii 是针对被渲染的子集的，
+    # 在 train.py 中我们已经处理了如何将这个子集的结果映射回完整点集。
+    # 这里不需要做额外修改，但要理解其含义。
     return {
         "render": rendered_image,
-        "viewspace_points": screenspace_points, # 现在这里是带有真实坐标的张量
+        "viewspace_points": screenspace_points, # 仍然返回完整的张量，但只有可见部分被更新
         "visibility_filter": radii > 0,
         "radii": radii,
     }
