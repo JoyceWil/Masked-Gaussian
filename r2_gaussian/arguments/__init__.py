@@ -19,6 +19,7 @@ class ModelParams(ParamGroup):
         self.eval = True
         self.soft_mask_dir = ""
         self.core_mask_dir = ""
+        self.air_mask_dir = ""
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -52,21 +53,34 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.25
         self.lambda_tv = 0.05
 
-        self.drop_rate_gamma = 0.0  # 丢弃率的最大值，设为0则禁用
-        self.drop_progressive_until = 15000  # 丢弃率达到最大值所需的迭代次数
-
         self.intelligent_confidence_threshold = 0.07
 
+        # --- 原有的ROI参数 ---
         self.roi_management_interval = 100
         self.roi_prune_threshold = -3.0
         self.roi_protect_threshold = 0.8
         self.roi_candidate_threshold = 0.2
-        self.roi_background_reward = -0.05  # 为背景点提供一个微小的正向激励
+        self.roi_background_reward = -0.05
         self.roi_standard_reward = 0.05
         self.roi_core_bonus_reward = 0.1
+        self.roi_air_penalty = -0.3
+
+        # --- 【V15.0 新增参数】 ---
+        # 总开关：是否启用置信度调制策略
+        self.use_confidence_modulation = True
+
+        # 置信度剪枝阈值：当一个点的置信度低于此值时，将被立即剪枝
+        # 注意：这个参数现在与您已有的 roi_prune_threshold 作用类似但更强力
+        self.confidence_prune_threshold = -5.0
+
+        # 置信度致密化缩放因子：用于调整置信度对致密化乘子的影响强度
+        self.confidence_densify_scale = 2.0
+        # --- 【结束新增】 ---
+
+        self.opacity_prune_threshold = 0.005
 
         self.tv_vol_size = 32
-        self.density_min_threshold = 0.00001
+        self.density_min_threshold = 0.005
         self.densification_interval = 100
         self.densify_from_iter = 500
         self.densify_until_iter = 15000
@@ -76,7 +90,6 @@ class OptimizationParams(ParamGroup):
         self.max_scale = None
         self.max_num_gaussians = 500_000
         super().__init__(parser, "Optimization Parameters")
-
 
 def get_combined_args(parser: ArgumentParser):
     cmdlne_string = sys.argv[1:]

@@ -158,114 +158,113 @@ class GaussianModel:
             if param_group["name"] == "scaling": lr = self.scaling_scheduler_args(iteration); param_group["lr"] = lr
             if param_group["name"] == "rotation": lr = self.rotation_scheduler_args(iteration); param_group["lr"] = lr
 
-    def update_roi_confidence(self, render_pkg, viewpoint_cam, standard_reward, core_bonus_reward, background_reward):
+    def update_roi_confidence(self, render_pkg, viewpoint_cam, standard_reward, core_bonus_reward, background_reward,
+                              air_penalty):
         """
-        【V6.0 最终修复版】
-        不再信任来自渲染管线的'viewspace_points'，而是在函数内部手动、可靠地重投影。
-        这可以保证无论渲染器实现如何，我们的ROI分类总是基于正确的2D坐标。
+        【V13.1 - 互斥修复版】
+        修复了四级分类中存在的逻辑漏洞，确保每个点在一次更新中只被归入一个类别。
+        分类严格遵循互斥优先级: 空气 -> 核心骨架 -> 软组织 -> 背景。
         """
         with torch.no_grad():
-            if not hasattr(viewpoint_cam, 'soft_mask') or not hasattr(viewpoint_cam, 'core_mask'):
+            use_roi = hasattr(viewpoint_cam, 'soft_mask') and hasattr(viewpoint_cam, 'core_mask')
+            use_air_penalty = hasattr(viewpoint_cam, 'air_mask') and air_penalty < 0.0
+            if not use_roi:
                 return
 
-            # --- 步骤 1: 获取必要数据 ---
-            H_img, W_img = viewpoint_cam.image_height, viewpoint_cam.image_width
-            soft_mask = viewpoint_cam.soft_mask.to(self.get_xyz.device)
-            core_mask = viewpoint_cam.core_mask.to(self.get_xyz.device)
             visibility_filter = render_pkg["visibility_filter"]
-
-            # 获取所有可见点的绝对索引
             visible_indices = visibility_filter.nonzero(as_tuple=True)[0]
             if visible_indices.numel() == 0:
                 return
 
-            # 获取这些可见点的3D世界坐标
+            # --- 坐标投影部分 (与之前版本相同) ---
             visible_xyz_world = self._xyz[visible_indices]
-
-            # --- 步骤 2: 可靠的3D到2D重投影 ---
-            # 从相机获取完整的投影变换矩阵 (World -> NDC)
             P = viewpoint_cam.full_proj_transform.cuda()
-
-            # 将3D世界坐标点转换为齐次坐标 (N, 4)
+            H_img, W_img = viewpoint_cam.image_height, viewpoint_cam.image_width
             points_homogeneous = torch.cat(
                 [visible_xyz_world, torch.ones(visible_xyz_world.shape[0], 1, device="cuda")], dim=1)
-
-            # 应用投影变换 (N, 4)
             points_clip = points_homogeneous @ P.T
-
-            # 执行透视除法，得到归一化设备坐标 (NDC) (N, 3)
-            # 我们只关心x, y。加上一个极小值避免除以0。
-            points_ndc = points_clip[..., :2] / (points_clip[..., 3:4] + 1e-8)
-
-            # 将NDC坐标 [-1, 1] 转换为像素坐标 [0, W-1] 和 [0, H-1]
-            # x_pix = (x_ndc + 1) * W / 2
-            # y_pix = (y_ndc + 1) * H / 2
-            # 注意：在3DGS中，Y轴通常是向下的，所以是 (1 - y_ndc)
+            w = points_clip[..., 3:4]
+            points_ndc = points_clip[..., :2] / (w + 1e-8)
+            in_front_of_camera = w.squeeze() > 0.001
+            if not in_front_of_camera.any():
+                return
             reliable_xy_proj = torch.zeros_like(points_ndc)
             reliable_xy_proj[:, 0] = (points_ndc[:, 0] + 1.0) * W_img / 2.0
-            reliable_xy_proj[:, 1] = (1.0 - points_ndc[:, 1]) * H_img / 2.0  # Y轴翻转
-
-            # --- 步骤 3: 使用可靠的2D坐标进行后续操作 ---
-            valid_xy_float = reliable_xy_proj
-
-            # 诊断探针现在应该会显示正确的范围了
-            if not hasattr(self, "final_probe_printed"):
-                print("\n--- [决定性诊断探针 v6.0 - 可靠重投影] ---")
-                min_x, max_x = valid_xy_float[:, 0].min(), valid_xy_float[:, 0].max()
-                min_y, max_y = valid_xy_float[:, 1].min(), valid_xy_float[:, 1].max()
-                print(f"  -> 探查 'reliable_xy_proj' 的坐标范围:")
-                print(f"  -> X 范围: [{min_x:.4f}, {max_x:.4f}]")
-                print(f"  -> Y 范围: [{min_y:.4f}, {max_y:.4f}]")
-                self.final_probe_printed = True
-
-            # 使用图像尺寸进行过滤
-            valid_coords_mask = (valid_xy_float[:, 0] >= 0) & (valid_xy_float[:, 0] < W_img) & \
-                                (valid_xy_float[:, 1] >= 0) & (valid_xy_float[:, 1] < H_img)
-
+            reliable_xy_proj[:, 1] = (1.0 - points_ndc[:, 1]) * H_img / 2.0
+            valid_coords_mask = (reliable_xy_proj[:, 0] >= 0) & (reliable_xy_proj[:, 0] < W_img) & \
+                                (reliable_xy_proj[:, 1] >= 0) & (reliable_xy_proj[:, 1] < H_img) & \
+                                in_front_of_camera
             in_image_indices_absolute = visible_indices[valid_coords_mask].contiguous()
             if in_image_indices_absolute.numel() == 0:
                 return
+            final_valid_xy = reliable_xy_proj[valid_coords_mask]
 
-            final_valid_xy = valid_xy_float[valid_coords_mask]
-
-            # --- 步骤 4: 采样和分类 (这部分逻辑不变) ---
+            # --- 掩码采样部分 (与之前版本相同) ---
+            soft_mask = viewpoint_cam.soft_mask.to(self.get_xyz.device)
+            core_mask = viewpoint_cam.core_mask.to(self.get_xyz.device)
             soft_mask_for_sampling = soft_mask.unsqueeze(0).unsqueeze(0)
             core_mask_for_sampling = core_mask.unsqueeze(0).unsqueeze(0)
-
-            # 归一化用于grid_sample
             normalized_xy = torch.zeros_like(final_valid_xy)
             normalized_xy[:, 0] = (final_valid_xy[:, 0] / (W_img - 1)) * 2 - 1
             normalized_xy[:, 1] = (final_valid_xy[:, 1] / (H_img - 1)) * 2 - 1
             grid = normalized_xy.unsqueeze(0).unsqueeze(0)
-
-            # 采样
             sampled_soft_values = torch.nn.functional.grid_sample(soft_mask_for_sampling, grid, mode='bilinear',
                                                                   padding_mode='zeros', align_corners=True).squeeze()
             sampled_core_values = torch.nn.functional.grid_sample(core_mask_for_sampling, grid, mode='bilinear',
                                                                   padding_mode='zeros', align_corners=True).squeeze()
 
-            # 使用您设定的阈值进行分类
-            is_in_soft_mask = sampled_soft_values > 0.07  # 软区阈值
-            is_in_core_mask = sampled_core_values > 0.08  # 核心区阈值
+            # --- 【核心逻辑修正】严格互斥的四级分类 ---
+            # 1. 首先，识别所有可能属于各类别的点的原始掩码
+            is_in_air_mask = torch.zeros_like(sampled_soft_values, dtype=torch.bool)
+            if use_air_penalty:
+                air_mask = viewpoint_cam.air_mask.to(self.get_xyz.device)
+                air_mask_for_sampling = air_mask.unsqueeze(0).unsqueeze(0)
+                sampled_air_values = torch.nn.functional.grid_sample(air_mask_for_sampling, grid, mode='bilinear',
+                                                                     padding_mode='zeros', align_corners=True).squeeze()
+                is_in_air_mask = sampled_air_values > 0.5
 
-            indices_in_core = in_image_indices_absolute[is_in_core_mask]
-            is_in_soft_only = is_in_soft_mask & ~is_in_core_mask
-            indices_in_soft_only = in_image_indices_absolute[is_in_soft_only]
-            is_background = ~is_in_soft_mask
-            indices_background = in_image_indices_absolute[is_background]
+            is_in_core_mask_raw = sampled_core_values > 0.08
+            is_in_soft_mask_raw = sampled_soft_values > 0.07
 
-            if hasattr(self, "final_probe_printed") and not hasattr(self, "final_count_printed"):
-                print(
-                    f"  -> [分类计数] 核心: {indices_in_core.numel()}, 软区: {indices_in_soft_only.numel()}, 背景: {indices_background.numel()}")
-                print("--- [探针结束] ---\n")
-                self.final_count_printed = True
+            # 2. 应用互斥逻辑，确保一个点只属于一个类别
+            # 类别1: 空气 (最高优先级)
+            mask_air = is_in_air_mask
 
-            # 更新置信度
-            self._roi_confidence[indices_in_core] += (standard_reward + core_bonus_reward)
-            self._roi_confidence[indices_in_soft_only] += standard_reward
-            self._roi_confidence[indices_background] += background_reward
+            # 类别2: 核心骨架 (必须不在空气中)
+            mask_core = is_in_core_mask_raw & ~mask_air
+
+            # 类别3: 软组织 (必须不在空气和核心中)
+            mask_soft = is_in_soft_mask_raw & ~mask_core & ~mask_air
+
+            # 类别4: 背景 (所有其他点)
+            mask_background = ~mask_air & ~mask_core & ~mask_soft
+
+            # 3. 根据最终的互斥掩码获取点索引
+            indices_in_air = in_image_indices_absolute[mask_air]
+            indices_in_core = in_image_indices_absolute[mask_core]
+            indices_in_soft_only = in_image_indices_absolute[mask_soft]
+            indices_background = in_image_indices_absolute[mask_background]
+
+            # --- 更新置信度 ---
+            if use_air_penalty and indices_in_air.numel() > 0:
+                self._roi_confidence[indices_in_air] += air_penalty
+
+            if indices_in_core.numel() > 0:
+                self._roi_confidence[indices_in_core] += (standard_reward + core_bonus_reward)
+
+            if indices_in_soft_only.numel() > 0:
+                self._roi_confidence[indices_in_soft_only] += standard_reward
+
+            if indices_background.numel() > 0:
+                self._roi_confidence[indices_background] += background_reward
 
             self._roi_confidence.clamp_(-10, 10)
+
+            print(f"\n[ROI Update] Air: {indices_in_air.numel()}, "
+                  f"Core: {indices_in_core.numel()}, "
+                  f"Soft: {indices_in_soft_only.numel()}, "
+                  f"BG: {indices_background.numel()}, "
+                  f"Total: {in_image_indices_absolute.numel()}")
 
     def construct_list_of_attributes(self):
         l = ["x", "y", "z", "nx", "ny", "nz", "density"]
@@ -287,30 +286,42 @@ class GaussianModel:
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
 
-    def densify_and_prune(
-            self,
-            max_grad,
-            min_density,
-            max_screen_size,
-            max_scale,
-            max_num_gaussians,
-            densify_scale_threshold,
-            bbox=None,
-            roi_protect_threshold=1e5,
-            roi_candidate_threshold=-1e5,
-    ):
+    def densify_and_prune(self, opt, max_scale, densify_scale_threshold, extent):
         """
-        【最终实现】实现基于ROI置信度的三层管理策略。
-        - 核心骨架 (roi_confidence > roi_protect_threshold): 优先分裂，受保护不被轻易剪枝。
-        - 探索前沿 (roi_candidate_threshold < roi_confidence <= roi_protect_threshold): 标准密集化与剪枝。
-        - 候选浮点 (roi_confidence <= roi_candidate_threshold): 禁止密集化，标准剪枝。
+        [V16.0 最终版] - “创生”与“凋亡”分离
+        - 使用 opt.density_min_threshold (Softplus) 来决定哪些点【有资格致密化】。
+        - 使用新增的 opt.opacity_prune_threshold (Sigmoid) 来决定哪些点【应该被剪枝】。
+        这从根本上解决了过度致密化的问题，同时保证了严格的噪声清除。
         """
         with torch.no_grad():
-            num_points_before = self.get_xyz.shape[0]
+            # --- 0. 提取参数 ---
+            densify_grad_threshold = opt.densify_grad_threshold
+            # 【V16.0 核心】分离阈值
+            densify_density_threshold = opt.density_min_threshold  # 用于控制致密化
+            prune_opacity_threshold = opt.opacity_prune_threshold  # 用于控制剪枝
+            max_screen_size = opt.max_screen_size
+
+            # --- 1. 致密化逻辑 (Densification Logic) ---
             grads = self.xyz_gradient_accum / self.denom
             grads[grads.isnan()] = 0.0
 
-            # --- 保存所有需要的初始状态 ---
+            # 【V16.0 核心】使用“致密化密度阈值”来筛选候选点
+            # 只有物理密度足够高的点，才有资格参与后续的梯度判断和分裂
+            candidates_mask = (self.get_density >= densify_density_threshold).squeeze()
+            grad_norm = torch.norm(grads, dim=-1)
+
+            if opt.use_confidence_modulation:
+                multiplier = 1.0 + torch.tanh(self._roi_confidence / opt.confidence_densify_scale)
+                effective_grad = grad_norm * multiplier.squeeze()
+            else:
+                effective_grad = grad_norm
+
+            densify_mask = (effective_grad > densify_grad_threshold).squeeze()
+            densify_mask &= candidates_mask
+
+            clone_mask = densify_mask & (torch.max(self.get_scaling, dim=1).values <= densify_scale_threshold)
+            split_mask = densify_mask & (torch.max(self.get_scaling, dim=1).values > densify_scale_threshold)
+
             initial_scales = self.get_scaling
             initial_xyz = self.get_xyz
             initial_rotation = self._rotation
@@ -318,66 +329,31 @@ class GaussianModel:
             initial_max_radii2D = self.max_radii2D
             initial_roi_confidence = self.get_roi_confidence
 
-            # --- 1. 定义置信度分层 ---
-            # 如果 roi_protect_threshold > 1 (即ROI管理未激活), 则所有点都属于探索前沿
-            is_roi_active = roi_protect_threshold <= 1.0
-
-            core_mask = (
-                        initial_roi_confidence > roi_protect_threshold).squeeze() if is_roi_active else torch.zeros_like(
-                initial_roi_confidence, dtype=torch.bool).squeeze()
-            candidate_mask = (
-                        initial_roi_confidence <= roi_candidate_threshold).squeeze() if is_roi_active else torch.zeros_like(
-                initial_roi_confidence, dtype=torch.bool).squeeze()
-            # 探索前沿是既非核心也非候选的中间地带
-            frontier_mask = ~(core_mask | candidate_mask)
-
-            # --- 2. 密集化策略 ---
-            # 计算标准密集化掩码 (基于梯度和点的大小)
-            densify_mask = (torch.norm(grads, dim=-1) >= max_grad)
-
-            # 【核心逻辑】禁止“候选浮点”阶层进行任何密集化
-            # 无论梯度多大，低置信度的点都没有资格创造后代
-            densify_mask[candidate_mask] = False
-
-            # 正常分离克隆和分裂的掩码
-            clone_mask = densify_mask & (torch.max(initial_scales, dim=1).values <= densify_scale_threshold)
-            split_mask = densify_mask & (torch.max(initial_scales, dim=1).values > densify_scale_threshold)
-
-            # 执行致密化
             self.densify_and_clone_with_mask(clone_mask)
             self.densify_and_split_with_mask(split_mask, initial_scales, initial_xyz, initial_rotation, initial_density,
                                              initial_max_radii2D, initial_roi_confidence)
 
-            # --- 3. 剪枝策略 ---
-            num_points_after = self.get_xyz.shape[0]
+            # --- 2. 剪枝逻辑 (Pruning Logic) ---
+            num_points_before_prune = self.get_xyz.shape[0]
 
-            # 计算标准剪枝掩码 (透明度低、出界、屏幕尺寸过大、物理尺寸过大)
-            prune_mask = (self.get_density < min_density).squeeze()
-            if bbox is not None:
-                prune_mask |= ~((self._xyz > bbox[0]) & (self._xyz < bbox[1])).all(dim=1)
+            # 【V16.0 核心】使用独立的、更严格的“不透明度剪枝阈值”
+            prune_mask = (torch.sigmoid(self._density) < prune_opacity_threshold).squeeze()
+
             if max_screen_size:
                 prune_mask |= (self.max_radii2D > max_screen_size)
+
             if max_scale:
                 prune_mask |= (self.get_scaling.max(dim=1).values > max_scale)
 
-            # 【核心逻辑】应用分层剪枝规则
-            if is_roi_active:
-                # 获取当前所有点的置信度（因为密集化后有了新点）
-                current_confidence = self.get_roi_confidence.squeeze()
-                current_core_mask = (current_confidence > roi_protect_threshold)
+            if opt.use_confidence_modulation:
+                confidence_prune_mask = (self._roi_confidence < opt.confidence_prune_threshold).squeeze()
+                num_conf_pruned = torch.sum(confidence_prune_mask).item()
+                if num_conf_pruned > 0:
+                    print(
+                        f"\033[93m[PRUNING]\033[0m Pruned {num_conf_pruned} points due to low confidence (threshold < {opt.confidence_prune_threshold}).")
+                prune_mask |= confidence_prune_mask
 
-                # 找到所有根据标准规则可能被剪枝的点
-                prune_candidates = prune_mask.clone()
-
-                # “核心骨架”阶层获得豁免权：如果一个点是核心骨架，就从剪枝候选中移除
-                protected_points_mask = current_core_mask[prune_candidates]
-                prune_candidates[prune_candidates.clone()] = ~protected_points_mask
-
-                # 更新最终的剪枝掩码
-                prune_mask = prune_candidates
-
-            # 移除被成功分裂的父代高斯点 (这是必须的)
-            num_new_points = num_points_after - num_points_before
+            num_new_points = num_points_before_prune - len(split_mask)
             padded_split_mask = torch.cat((split_mask, torch.zeros(num_new_points, dtype=torch.bool, device="cuda")),
                                           dim=0)
             prune_mask |= padded_split_mask

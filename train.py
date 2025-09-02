@@ -153,10 +153,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         tv_vol_nVoxel = torch.tensor([tv_vol_size, tv_vol_size, tv_vol_size], device=device)
         tv_vol_sVoxel = torch.tensor(scanner_cfg["dVoxel"], device=device, dtype=torch.float32) * tv_vol_nVoxel
 
-    use_drop_gaussian = opt.drop_rate_gamma > 0 and opt.drop_rate_gamma <= 1
-    if use_drop_gaussian:
-        print(f"Use DropGaussian with gamma = {opt.drop_rate_gamma}, progressive until {opt.drop_progressive_until}")
-
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
     ckpt_save_path = osp.join(scene.model_path, "ckpt")
@@ -171,31 +167,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         if not viewpoint_stack: viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
         active_sh_indices = None
-        if use_drop_gaussian and iteration > 6000:
-            num_gaussians = gaussians.get_xyz.shape[0]
-            confidence = gaussians.get_roi_confidence.detach()
-
-            # 1. 计算总共要丢弃多少个点
-            progress = min(1.0, iteration / opt.drop_progressive_until)
-            current_drop_rate = opt.drop_rate_gamma * progress
-            num_to_drop = int(current_drop_rate * num_gaussians)
-
-            if num_to_drop > 0:
-                # 2. 根据置信度决定丢弃的优先级
-                # 置信度越低的点，越容易被丢弃。我们直接对置信度进行排序。
-                # a_i < a_j  =>  i is dropped before j
-                sorted_confidence, sorted_indices = torch.sort(confidence)
-
-                # 3. 选取置信度最低的 num_to_drop 个点的索引作为要被丢弃的索引
-                indices_to_drop = sorted_indices[:num_to_drop]
-
-                # 4. 创建一个保留点的掩码
-                keep_mask = torch.ones(num_gaussians, dtype=torch.bool, device="cuda")
-                keep_mask[indices_to_drop] = False
-
-                # 5. 从掩码得到要保留的点的索引
-                active_sh_indices = torch.where(keep_mask)[0]
-
         render_pkg = render(viewpoint_cam, gaussians, pipe, active_sh_indices=active_sh_indices)
         image = render_pkg["render"]
         gt_image = viewpoint_cam.original_image.cuda()
@@ -213,29 +184,23 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             loss_tv = tv_3d_loss(vol_pred, reduction="mean")
             loss["tv"] = loss_tv
             loss["total"] = loss["total"] + opt.lambda_tv * loss_tv
-        if use_shape_regularization:
-            scales = gaussians.get_scaling
-            if scales.shape[0] > 0:
-                max_scales, _ = torch.max(scales, dim=1)
-                min_scales, _ = torch.min(scales, dim=1)
-                epsilon = 1e-8
-                loss_shape = torch.mean(max_scales / (min_scales + epsilon) - 1.0)
-                loss["shape"] = loss_shape
-                loss["total"] = loss["total"] + opt.lambda_shape * loss_shape
+
         loss["total"].backward()
         iter_end.record()
         torch.cuda.synchronize()
         with torch.no_grad():
-            if args.soft_mask_dir and args.core_mask_dir and iteration >= args.roi_update_start_iter and iteration % args.roi_management_interval == 0:
-                background_reward = opt.roi_background_reward if hasattr(opt,
-                                                                         'roi_background_reward') else -opt.roi_penalty
+            if roi_management_active and iteration >= args.roi_update_start_iter and iteration % opt.roi_management_interval == 0:
+                background_reward = opt.roi_background_reward
 
+                # 【修改】传递新的空气惩罚参数
                 gaussians.update_roi_confidence(
                     render_pkg,
-                    viewpoint_cam,  # 直接传递当前视角的相机对象
+                    viewpoint_cam,
                     opt.roi_standard_reward,
                     opt.roi_core_bonus_reward,
-                    background_reward
+                    background_reward,
+                    # 如果 air_mask_dir 被指定，则使用 opt.roi_air_penalty，否则传递 0.0 (无惩罚)
+                    opt.roi_air_penalty if (hasattr(args, 'air_mask_dir') and args.air_mask_dir) else 0.0
                 )
 
             visibility_filter = render_pkg["visibility_filter"]
@@ -263,15 +228,10 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                 if (iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0):
                     # 【修改】将所有需要的阈值参数完整地传递给函数
                     gaussians.densify_and_prune(
-                        opt.densify_grad_threshold,
-                        opt.density_min_threshold,
-                        opt.max_screen_size,
+                        opt,
                         max_scale,
-                        opt.max_num_gaussians,
                         densify_scale_threshold,
-                        bbox,
-                        roi_protect_threshold=opt.roi_protect_threshold if roi_management_active else 1e5,
-                        roi_candidate_threshold=opt.roi_candidate_threshold if roi_management_active else -1e5
+                        scene.scene_scale  # <--- 使用这个正确的场景缩放属性
                     )
             if gaussians.get_density.shape[0] == 0: raise ValueError("没有剩余的高斯点。请调整自适应控制超参数！")
             if iteration < opt.iterations:
