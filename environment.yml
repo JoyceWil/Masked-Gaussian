@@ -1,5 +1,6 @@
 name: r2_gaussian
 channels:
+  - nvidia
   - pytorch
   - conda-forge
   - defaults

@@ -22,6 +22,7 @@ def loadCam(args, id, cam_info):
         image=gt_image,
         image_name=cam_info.image_name,
         uid=id,
+        args=args,  # <--- 在这里加上它！
         data_device=args.data_device,
     )
 
