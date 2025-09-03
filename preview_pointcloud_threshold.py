@@ -7,10 +7,10 @@ from pathlib import Path
 
 # --- 参数设置 ---
 # 请将这里替换为您的 .npy 文件路径
-POINT_CLOUD_FILE = "/media/data2/hezhipeng/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone/init_0_chest_cone.npy"
+POINT_CLOUD_FILE = "data/0_chest_cone/init_0_chest_cone.npy"
 
 # 输出目录
-OUTPUT_DIR = Path('/home/hezhipeng/Workbench/r2_gaussian-main/output/pointcloud_threshold_previews/')
+OUTPUT_DIR = Path('output/pointcloud_threshold_previews/')
 
 # 要测试的密度阈值
 THRESHOLDS = [0.01, 0.03, 0.05, 0.06, 0.07, 0.08, 0.1]
