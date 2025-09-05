@@ -53,7 +53,14 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.25
         self.lambda_tv = 0.05
 
+        # --- [整合开始] ---
+        # 将所有智能初始化相关的参数集中在这里
+        # 添加 mode 和 percentile 参数，并为它们设置默认值
+        self.intelligent_confidence_mode = 'percentile'
+        self.intelligent_confidence_percentile = 40.0
+        # 保留原有的固定阈值参数，用于 'fixed' 模式
         self.intelligent_confidence_threshold = 0.07
+        # --- [整合结束] ---
 
         # --- 原有的ROI参数 ---
         self.roi_management_interval = 100
@@ -62,18 +69,12 @@ class OptimizationParams(ParamGroup):
         self.roi_candidate_threshold = 0.2
         self.roi_background_reward = -0.05
         self.roi_standard_reward = 0.05
-        self.roi_core_bonus_reward = 0.1
+        self.roi_core_bonus_reward = 0.5
         self.roi_air_penalty = -0.3
 
         # --- 【V15.0 新增参数】 ---
-        # 总开关：是否启用置信度调制策略
         self.use_confidence_modulation = True
-
-        # 置信度剪枝阈值：当一个点的置信度低于此值时，将被立即剪枝
-        # 注意：这个参数现在与您已有的 roi_prune_threshold 作用类似但更强力
         self.confidence_prune_threshold = -5.0
-
-        # 置信度致密化缩放因子：用于调整置信度对致密化乘子的影响强度
         self.confidence_densify_scale = 2.0
         # --- 【结束新增】 ---
 
@@ -89,7 +90,10 @@ class OptimizationParams(ParamGroup):
         self.max_screen_size = None
         self.max_scale = None
         self.max_num_gaussians = 500_000
+
+        # 这个super().__init__调用会自动将上面定义的所有属性注册为命令行参数
         super().__init__(parser, "Optimization Parameters")
+
 
 def get_combined_args(parser: ArgumentParser):
     cmdlne_string = sys.argv[1:]

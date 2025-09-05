@@ -5,9 +5,9 @@ import os
 # --- 1. 配置与常量 ---
 
 # 输入的NPY投影文件名 (请根据需要修改)
-PROJECTION_FILE = "/media/data2/synthetic_dataset/cone_ntrain_50_angle_360/0_head_cone/proj_train/proj_train_0000.npy"
+PROJECTION_FILE = "data/1_beetle_cone/proj_train/proj_train_0000.npy"
 # 输出可视化图像的文件夹 (请根据需要修改)
-OUTPUT_DIR = '/media/data2/synthetic_dataset/cone_ntrain_50_angle_360/0_head_cone/hu_visualization'
+OUTPUT_DIR = 'data/1_beetle_cone/hu_visualization'
 
 # 人体组织CT值表 (HU范围)
 HU_RANGES = {

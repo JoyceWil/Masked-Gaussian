@@ -140,7 +140,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Visualize point cloud thresholding with different methods.")
     parser.add_argument('--mode', type=str, default='percentile', choices=['percentile', 'multi_otsu'],
                         help="The thresholding method to use.")
-    parser.add_argument('--percentile', type=float, default=5.0,
+    parser.add_argument('--percentile', type=float, default=40.0,
                         help="For 'percentile' mode, the percentage of top density points to keep.")
     parser.add_argument('--classes', type=int, default=4,
                         help="For 'multi_otsu' mode, the number of classes to segment into.")

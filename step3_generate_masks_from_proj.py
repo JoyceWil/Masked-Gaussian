@@ -6,7 +6,7 @@ from PIL import Image  # 我们将使用PIL来保存为PNG，因为这样更直�
 
 # --- 配置区 ---
 # 请根据您的实际路径进行修改
-BASE_DIR = 'data/0_chest_cone'
+BASE_DIR = 'data/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone'
 META_FILE = os.path.join(BASE_DIR, 'meta_data.json')
 
 # 【新】定义三个输出目录

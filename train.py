@@ -91,24 +91,22 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
     initialize_gaussian(gaussians, dataset, None)
 
-    if opt.intelligent_confidence_threshold > 0:
-        print(f"\n--- [智能置信度初始化] ---")
-        print(f"正在为初始点云赋予ROI置信度奖励，FDK密度阈值: {opt.intelligent_confidence_threshold}")
-        with torch.no_grad():
-            # 获取所有初始点的世界坐标
-            initial_xyz = gaussians.get_xyz
+    # --- [整合开始] --- 升级智能置信度初始化模块 ---
+    # 我们不再使用 opt.intelligent_confidence_threshold > 0 作为判断条件，而是使用新的模式参数
+    if opt.intelligent_confidence_mode != 'none':
+        print(f"\n--- [智能置信度初始化模块] ---")
+        print(f"模式: {opt.intelligent_confidence_mode}")
 
-            # 从scene对象获取FDK体积和坐标转换信息
+        with torch.no_grad():
+            initial_xyz = gaussians.get_xyz
             fdk_volume = scene.vol_gt.to(initial_xyz.device)
             grid_center = scene.grid_center.to(initial_xyz.device)
             voxel_size = scene.voxel_size.to(initial_xyz.device)
             grid_dims = torch.tensor(fdk_volume.shape, device=initial_xyz.device)
 
-            # 将世界坐标转换为FDK体积的网格索引
             relative_coords = initial_xyz - grid_center
             grid_indices = torch.round((relative_coords / voxel_size) + (grid_dims / 2.0)).long()
 
-            # 筛选出在FDK体积内的点
             valid_mask = (grid_indices[:, 2] >= 0) & (grid_indices[:, 2] < grid_dims[0]) & \
                          (grid_indices[:, 1] >= 0) & (grid_indices[:, 1] < grid_dims[1]) & \
                          (grid_indices[:, 0] >= 0) & (grid_indices[:, 0] < grid_dims[2])
@@ -117,19 +115,44 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             valid_grid_indices = grid_indices[valid_mask]
 
             if absolute_indices_of_valid_points.numel() > 0:
-                # 查询这些点在FDK体积中的密度值
                 point_densities = fdk_volume[
                     valid_grid_indices[:, 2],  # Z
                     valid_grid_indices[:, 1],  # Y
                     valid_grid_indices[:, 0]  # X
                 ]
 
-                # 找到密度高于我们设定阈值的点
-                core_points_mask = point_densities > opt.intelligent_confidence_threshold
-                target_indices = absolute_indices_of_valid_points[core_points_mask]
+                # --- [核心逻辑替换] ---
+                # 根据选择的模式来确定核心点
+                if opt.intelligent_confidence_mode == 'percentile':
+                    percentile_to_keep = opt.intelligent_confidence_percentile
+                    # 计算百分位对应的密度阈值
+                    # np.percentile的q参数范围是0-100, 我们要找的是顶端，所以用100减去
+                    q = 100.0 - percentile_to_keep
+                    # 需要将数据移到CPU上用numpy计算
+                    densities_np = point_densities.cpu().numpy()
 
-                # 为这些“核心点”赋予初始奖励
-                # 我们使用 roi_core_bonus_reward 作为这个奖励值
+                    # 增加一个检查，防止所有密度都一样导致计算错误
+                    if densities_np.size > 0 and densities_np.max() > densities_np.min():
+                        calculated_threshold = np.percentile(densities_np, q)
+                    else:
+                        # 如果所有密度都一样，就取这个密度值，或者一个默认值
+                        calculated_threshold = densities_np[0] if densities_np.size > 0 else 0.0
+
+                    print(
+                        f"筛选密度最高的 {percentile_to_keep}% 点, 自动计算出的FDK密度阈值为: {calculated_threshold:.4f}")
+                    core_points_mask = point_densities >= calculated_threshold
+
+                elif opt.intelligent_confidence_mode == 'fixed':
+                    fixed_threshold = opt.intelligent_confidence_threshold
+                    print(f"使用固定的FDK密度阈值: {fixed_threshold:.4f}")
+                    core_points_mask = point_densities > fixed_threshold
+
+                else:  # 预防性代码
+                    core_points_mask = torch.zeros_like(point_densities, dtype=torch.bool)
+
+                # --- [逻辑结束] ---
+
+                target_indices = absolute_indices_of_valid_points[core_points_mask]
                 initial_reward = opt.roi_core_bonus_reward
                 gaussians._roi_confidence[target_indices] = initial_reward
 
@@ -138,6 +161,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
             else:
                 print("警告: 没有一个初始点落在FDK体积内，无法进行智能置信度初始化。")
         print(f"--- [初始化结束] ---\n")
+    # --- [整合结束] ---
 
     scene.gaussians = gaussians
     gaussians.training_setup(opt)
@@ -335,6 +359,13 @@ if __name__ == "__main__":
     parser.add_argument('--mask_core_p', type=int, default=50,help="自动生成核心骨架掩码的百分位数。")
     parser.add_argument('--no_previews', dest='save_previews', action='store_false',help="设置此项后，将不生成PNG格式的掩码预览图，只生成NPY文件。")
     parser.set_defaults(save_previews=True)
+
+    op_group = parser.add_argument_group("Optimization", "Optimization parameters")
+    # op_group.add_argument("--intelligent_confidence_mode", type=str, default='percentile',
+    #                       choices=['none', 'fixed', 'percentile'],
+    #                       help="智能置信度初始化模式: 'none' (关闭), 'fixed' (使用固定阈值), 'percentile' (使用百分位法，推荐)。")
+    # op_group.add_argument("--intelligent_confidence_percentile", type=float, default=5.0,
+    #                       help="当模式为 'percentile' 时，定义要识别为核心点的最高密度点的百分比 (例如, 5.0 代表前5%%)。")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
