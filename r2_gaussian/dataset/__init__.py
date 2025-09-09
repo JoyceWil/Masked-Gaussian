@@ -1,3 +1,4 @@
+# r2_gaussian/dataset/__init__.py (最终修复版)
 import os
 import sys
 import random
@@ -27,23 +28,22 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = None
 
-        # 【修改1】获取所有掩码目录路径
+        # --- 【核心修改 1】 ---
+        # 直接从 args 中获取我们需要的两个目录
         self.soft_mask_dir = args.soft_mask_dir
         self.core_mask_dir = args.core_mask_dir
-        self.air_mask_dir = args.air_mask_dir if hasattr(args, 'air_mask_dir') else None  # 兼容旧配置
 
+        # 检查这两个目录是否都已提供并且真实存在
         self.use_roi_masks = self.soft_mask_dir and self.core_mask_dir and \
                              osp.exists(self.soft_mask_dir) and osp.exists(self.core_mask_dir)
 
         if self.use_roi_masks:
             print("2D动态掩码目录已找到，ROI管理将被激活。")
-            print(f"软组织掩码目录: {self.soft_mask_dir}")
-            print(f"核心骨架掩码目录: {self.core_mask_dir}")
-            # 【修复】打印正确的空气掩码目录
-            if self.air_mask_dir and osp.exists(self.air_mask_dir):
-                print(f"空气掩码目录: {self.air_mask_dir}")
+            print(f"  - 软组织掩码目录: {self.soft_mask_dir}")
+            print(f"  - 核心骨架掩码目录: {self.core_mask_dir}")
         else:
             print("警告: 未提供有效的2D掩码目录，ROI管理将不会被激活。")
+        # --- 【修改结束】 ---
 
         # Read scene info
         if osp.exists(osp.join(args.source_path, "meta_data.json")):
@@ -57,45 +57,40 @@ class Scene:
             random.shuffle(scene_info.train_cameras)
             random.shuffle(scene_info.test_cameras)
 
-        # Load cameras
-        # 【注意】这里的 cameraList_from_camInfos 不需要修改，因为它不处理掩码
         print("Loading Training Cameras")
         self.train_cameras = cameraList_from_camInfos(scene_info.train_cameras, args)
         print("Loading Test Cameras")
         self.test_cameras = cameraList_from_camInfos(scene_info.test_cameras, args)
 
-        # 【修改2】为每个训练相机一次性加载所有掩码
+        # --- 【核心修改 2】 ---
+        # 为每个训练相机一次性加载所有掩码
         if self.use_roi_masks:
             print("正在为训练相机加载2D掩码...")
             for camera in self.train_cameras:
+                # 假设掩码文件名与图像名对应，例如 'proj_train_0000.png' -> 'proj_train_0000.npy'
                 base_name = osp.splitext(osp.basename(camera.image_name))[0] + '.npy'
 
                 soft_mask_path = osp.join(self.soft_mask_dir, base_name)
                 core_mask_path = osp.join(self.core_mask_dir, base_name)
 
-                # 加载 soft 和 core 掩码
+                # 加载 soft 和 core 掩码，如果找不到则创建全零张量以保证鲁棒性
                 if osp.exists(soft_mask_path):
                     camera.soft_mask = torch.from_numpy(np.load(soft_mask_path)).float()
                 else:
-                    print(f"警告: 找不到视图 {base_name} 对应的软组织掩码。")
+                    print(f"警告: 找不到视图 {base_name} 对应的软组织掩码，将使用空掩码。")
                     h, w = camera.image_height, camera.image_width
                     camera.soft_mask = torch.zeros((h, w), dtype=torch.float32)
 
                 if osp.exists(core_mask_path):
                     camera.core_mask = torch.from_numpy(np.load(core_mask_path)).float()
                 else:
-                    print(f"警告: 找不到视图 {base_name} 对应的核心骨架掩码。")
+                    print(f"警告: 找不到视图 {base_name} 对应的核心骨架掩码，将使用空掩码。")
                     h, w = camera.image_height, camera.image_width
                     camera.core_mask = torch.zeros((h, w), dtype=torch.float32)
 
-                # 【新增】加载 air 掩码
-                if self.air_mask_dir and osp.exists(self.air_mask_dir):
-                    air_mask_path = osp.join(self.air_mask_dir, base_name)
-                    if osp.exists(air_mask_path):
-                        camera.air_mask = torch.from_numpy(np.load(air_mask_path)).float()
-                    # 如果 air_mask 不存在，我们不需要创建空对象，因为后续逻辑会检查 hasattr(camera, 'air_mask')
+                # 移除了所有与 air_mask 相关的加载逻辑
+        # --- 【修改结束】 ---
 
-        # Set up some parameters
         self.vol_gt = scene_info.vol
         self.scanner_cfg = scene_info.scanner_cfg
         self.scene_scale = scene_info.scene_scale

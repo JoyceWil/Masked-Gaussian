@@ -17,9 +17,13 @@ class ModelParams(ParamGroup):
         self.scale_min = 0.0005
         self.scale_max = 0.5
         self.eval = True
+
+        # --- 【核心修改 1】 ---
+        # 只保留我们需要的两个掩码参数，并移除 air_mask_dir
         self.soft_mask_dir = ""
         self.core_mask_dir = ""
-        self.air_mask_dir = ""
+        # --- 【修改结束】 ---
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -39,7 +43,7 @@ class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
         self.position_lr_init = 0.0002
-        self.position_lr_final = 0.00002
+        self.position_lr_final = 0.000002
         self.position_lr_max_steps = 30_000
         self.density_lr_init = 0.01
         self.density_lr_final = 0.001
@@ -53,30 +57,26 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.25
         self.lambda_tv = 0.05
 
-        # --- [整合开始] ---
-        # 将所有智能初始化相关的参数集中在这里
-        # 添加 mode 和 percentile 参数，并为它们设置默认值
         self.intelligent_confidence_mode = 'percentile'
         self.intelligent_confidence_percentile = 40.0
-        # 保留原有的固定阈值参数，用于 'fixed' 模式
-        self.intelligent_confidence_threshold = 0.07
-        # --- [整合结束] ---
+        # self.intelligent_confidence_threshold = 0.07
 
-        # --- 原有的ROI参数 ---
         self.roi_management_interval = 100
         self.roi_prune_threshold = -3.0
         self.roi_protect_threshold = 0.8
         self.roi_candidate_threshold = 0.2
         self.roi_background_reward = -0.05
         self.roi_standard_reward = 0.05
-        self.roi_core_bonus_reward = 0.5
-        self.roi_air_penalty = -0.3
+        self.roi_core_bonus_reward = 0.05
 
-        # --- 【V15.0 新增参数】 ---
         self.use_confidence_modulation = True
-        self.confidence_prune_threshold = -5.0
+        self.confidence_prune_center = -2.0
+        self.confidence_prune_steepness = 2.0
+
+        # 添加新的调制致密化参数
+        self.confidence_densify_sensitivity = 2.5
+
         self.confidence_densify_scale = 2.0
-        # --- 【结束新增】 ---
 
         self.opacity_prune_threshold = 0.005
 
@@ -91,7 +91,6 @@ class OptimizationParams(ParamGroup):
         self.max_scale = None
         self.max_num_gaussians = 500_000
 
-        # 这个super().__init__调用会自动将上面定义的所有属性注册为命令行参数
         super().__init__(parser, "Optimization Parameters")
 
 

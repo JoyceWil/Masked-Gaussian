@@ -33,22 +33,16 @@ def plot_and_save_confidence_distribution(confidence_data, iteration, output_dir
         return
 
     plt.figure(figsize=(14, 8))
-
-    # 【核心修改】移除了 range=(-2, 2) 参数，让绘图范围自动适应所有数据
     plt.hist(confidence_data, bins=150, color='deepskyblue', edgecolor='black', alpha=0.7, log=True)
-
     plt.title(f'ROI Confidence Distribution at Iteration {iteration} (Log Scale)', fontsize=16)
     plt.xlabel('Confidence Value', fontsize=12)
     plt.ylabel('Number of Gaussian Points (Log Scale)', fontsize=12)
     plt.grid(True, which="both", ls="--", linewidth=0.5)
-
-    # 标记我们的关键阈值
     plt.axvline(x=protect_threshold, color='green', linestyle='--', linewidth=2,
                 label=f'Protect Threshold ({protect_threshold})')
     plt.axvline(x=candidate_threshold, color='red', linestyle='--', linewidth=2,
                 label=f'Candidate Threshold ({candidate_threshold})')
 
-    # 在图上显示统计数据
     mean_conf = np.mean(confidence_data)
     median_conf = np.median(confidence_data)
     std_conf = np.std(confidence_data)
@@ -65,34 +59,36 @@ def plot_and_save_confidence_distribution(confidence_data, iteration, output_dir
 
     plt.legend(fontsize=12)
     plt.tight_layout()
-
-    # 保存图像
     save_path = osp.join(output_dir, f"confidence_distribution_iter_{iteration}.png")
     plt.savefig(save_path, dpi=200)
     plt.close()
     tqdm.write(f"[INFO] Confidence distribution plot saved to: {save_path}")
 
-def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, tb_writer, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
+
+def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, tb_writer, testing_iterations,
+             saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     scene = Scene(dataset, shuffle=False)
     roi_management_active = scene.use_roi_masks
     if roi_management_active:
         print("ROI置信度管理已在训练流程中激活。")
+        # 这部分现在只是信息展示，实际的奖励值直接在调用时传递
         confidence_thresholds = {"prune": opt.roi_prune_threshold, "protect": opt.roi_protect_threshold}
-        rewards = {"penalty": opt.roi_background_reward, "standard": opt.roi_standard_reward, "core_bonus": opt.roi_core_bonus_reward}
+        rewards = {"penalty": opt.roi_background_reward, "standard": opt.roi_standard_reward,
+                   "core_bonus": opt.roi_core_bonus_reward}
+
     scanner_cfg = scene.scanner_cfg
     bbox = scene.bbox
     volume_to_world = max(scanner_cfg["sVoxel"])
     max_scale = opt.max_scale * volume_to_world if opt.max_scale else None
     densify_scale_threshold = opt.densify_scale_threshold * volume_to_world if opt.densify_scale_threshold else None
-    scale_bound = np.array([dataset.scale_min, dataset.scale_max]) * volume_to_world if dataset.scale_min and dataset.scale_max else None
+    scale_bound = np.array(
+        [dataset.scale_min, dataset.scale_max]) * volume_to_world if dataset.scale_min and dataset.scale_max else None
     queryfunc = lambda x: query(x, scanner_cfg["offOrigin"], scanner_cfg["nVoxel"], scanner_cfg["sVoxel"], pipe)
     gaussians = GaussianModel(scale_bound)
 
     initialize_gaussian(gaussians, dataset, None)
 
-    # --- [整合开始] --- 升级智能置信度初始化模块 ---
-    # 我们不再使用 opt.intelligent_confidence_threshold > 0 作为判断条件，而是使用新的模式参数
     if opt.intelligent_confidence_mode != 'none':
         print(f"\n--- [智能置信度初始化模块] ---")
         print(f"模式: {opt.intelligent_confidence_mode}")
@@ -121,47 +117,32 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                     valid_grid_indices[:, 0]  # X
                 ]
 
-                # --- [核心逻辑替换] ---
-                # 根据选择的模式来确定核心点
                 if opt.intelligent_confidence_mode == 'percentile':
                     percentile_to_keep = opt.intelligent_confidence_percentile
-                    # 计算百分位对应的密度阈值
-                    # np.percentile的q参数范围是0-100, 我们要找的是顶端，所以用100减去
                     q = 100.0 - percentile_to_keep
-                    # 需要将数据移到CPU上用numpy计算
                     densities_np = point_densities.cpu().numpy()
-
-                    # 增加一个检查，防止所有密度都一样导致计算错误
                     if densities_np.size > 0 and densities_np.max() > densities_np.min():
                         calculated_threshold = np.percentile(densities_np, q)
                     else:
-                        # 如果所有密度都一样，就取这个密度值，或者一个默认值
                         calculated_threshold = densities_np[0] if densities_np.size > 0 else 0.0
-
                     print(
                         f"筛选密度最高的 {percentile_to_keep}% 点, 自动计算出的FDK密度阈值为: {calculated_threshold:.4f}")
                     core_points_mask = point_densities >= calculated_threshold
-
                 elif opt.intelligent_confidence_mode == 'fixed':
                     fixed_threshold = opt.intelligent_confidence_threshold
                     print(f"使用固定的FDK密度阈值: {fixed_threshold:.4f}")
                     core_points_mask = point_densities > fixed_threshold
-
-                else:  # 预防性代码
+                else:
                     core_points_mask = torch.zeros_like(point_densities, dtype=torch.bool)
-
-                # --- [逻辑结束] ---
 
                 target_indices = absolute_indices_of_valid_points[core_points_mask]
                 initial_reward = opt.roi_core_bonus_reward
                 gaussians._roi_confidence[target_indices] = initial_reward
-
                 print(
                     f"操作完成: {target_indices.numel()} / {initial_xyz.shape[0]} 个点被识别为核心点，并赋予了 {initial_reward:.2f} 的初始置信度。")
             else:
                 print("警告: 没有一个初始点落在FDK体积内，无法进行智能置信度初始化。")
         print(f"--- [初始化结束] ---\n")
-    # --- [整合结束] ---
 
     scene.gaussians = gaussians
     gaussians.training_setup(opt)
@@ -188,22 +169,26 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         iter_start.record()
         gaussians.update_learning_rate(iteration)
         if not viewpoint_stack: viewpoint_stack = scene.getTrainCameras().copy()
-        if not viewpoint_stack: viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+
         active_sh_indices = None
         render_pkg = render(viewpoint_cam, gaussians, pipe, active_sh_indices=active_sh_indices)
         image = render_pkg["render"]
         gt_image = viewpoint_cam.original_image.cuda()
+
         loss = {"total": 0.0}
         render_loss = l1_loss(image, gt_image)
         loss["render"] = render_loss
         loss["total"] += loss["render"]
+
         if opt.lambda_dssim > 0:
             loss_dssim = 1.0 - ssim(image, gt_image)
             loss["dssim"] = loss_dssim
             loss["total"] = loss["total"] + opt.lambda_dssim * loss_dssim
+
         if use_tv:
-            tv_vol_center = (bbox[0] + tv_vol_sVoxel / 2) + (bbox[1] - tv_vol_sVoxel - bbox[0]) * torch.rand(3, device=bbox.device)
+            tv_vol_center = (bbox[0] + tv_vol_sVoxel / 2) + (bbox[1] - tv_vol_sVoxel - bbox[0]) * torch.rand(3,
+                                                                                                             device=bbox.device)
             vol_pred = query(gaussians, tv_vol_center, tv_vol_nVoxel, tv_vol_sVoxel, pipe)["vol"]
             loss_tv = tv_3d_loss(vol_pred, reduction="mean")
             loss["tv"] = loss_tv
@@ -212,95 +197,105 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
         loss["total"].backward()
         iter_end.record()
         torch.cuda.synchronize()
+
         with torch.no_grad():
             if roi_management_active and iteration >= args.roi_update_start_iter and iteration % opt.roi_management_interval == 0:
-                background_reward = opt.roi_background_reward
-
-                # 【修改】传递新的空气惩罚参数
+                # --- 【核心修改】 ---
+                # 移除了所有与 air_mask 和 air_penalty 相关的逻辑。
+                # 函数调用变得更简洁，只传递新策略需要的参数。
                 gaussians.update_roi_confidence(
                     render_pkg,
                     viewpoint_cam,
                     opt.roi_standard_reward,
                     opt.roi_core_bonus_reward,
-                    background_reward,
-                    # 如果 air_mask_dir 被指定，则使用 opt.roi_air_penalty，否则传递 0.0 (无惩罚)
-                    opt.roi_air_penalty if (hasattr(args, 'air_mask_dir') and args.air_mask_dir) else 0.0
+                    opt.roi_background_reward
                 )
+                # --- 【修改结束】 ---
 
             visibility_filter = render_pkg["visibility_filter"]
             radii = render_pkg["radii"]
             viewspace_point_tensor = render_pkg["viewspace_points"]
 
             if active_sh_indices is not None:
-                # 创建一个完整大小的、全为 False 的掩码
                 full_visibility_filter = torch.zeros(gaussians.get_xyz.shape[0], dtype=torch.bool, device="cuda")
-                # 将可见点的索引设置为 True
                 full_visibility_filter[active_sh_indices[visibility_filter]] = True
-
-                # 更新 max_radii2D 时也需要使用映射
                 gaussians.max_radii2D[full_visibility_filter] = torch.max(
                     gaussians.max_radii2D[full_visibility_filter], radii[visibility_filter]
                 )
                 gaussians.add_densification_stats(viewspace_point_tensor, full_visibility_filter)
             else:
-                # 如果没有使用 drop, 行为和原来一样
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
                                                                      radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if iteration < opt.densify_until_iter:
                 if (iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0):
-                    # 【修改】将所有需要的阈值参数完整地传递给函数
                     gaussians.densify_and_prune(
                         opt,
                         max_scale,
                         densify_scale_threshold,
-                        scene.scene_scale  # <--- 使用这个正确的场景缩放属性
+                        scene.scene_scale
                     )
             if gaussians.get_density.shape[0] == 0: raise ValueError("没有剩余的高斯点。请调整自适应控制超参数！")
+
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+
             if iteration in saving_iterations or iteration == opt.iterations:
                 tqdm.write(f"[ITER {iteration}] 保存高斯模型")
                 scene.save(iteration, queryfunc)
+
             if iteration == opt.iterations and args.plot_confidence:
                 tqdm.write("\n[INFO] 训练结束，开始生成最终的置信度分布图...")
                 confidence_data = gaussians.get_roi_confidence.cpu().numpy()
                 plot_and_save_confidence_distribution(
                     confidence_data,
                     iteration,
-                    scene.model_path,  # 保存到主模型目录
+                    scene.model_path,
                     opt.roi_protect_threshold,
                     opt.roi_candidate_threshold
                 )
+
             if iteration in checkpoint_iterations:
                 tqdm.write(f"[ITER {iteration}] 保存检查点")
                 torch.save((gaussians.capture(), iteration), ckpt_save_path + "/chkpnt" + str(iteration) + ".pth")
+
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"loss": f"{loss['total'].item():.1e}", "pts": f"{gaussians.get_density.shape[0]:2.1e}", "conf_avg": f"{gaussians.get_roi_confidence.mean().item():.2f}" if roi_management_active and gaussians.get_roi_confidence.numel() > 0 else "N/A"})
+                progress_bar.set_postfix(
+                    {"loss": f"{loss['total'].item():.1e}", "pts": f"{gaussians.get_density.shape[0]:2.1e}",
+                     "conf_avg": f"{gaussians.get_roi_confidence.mean().item():.2f}" if roi_management_active and gaussians.get_roi_confidence.numel() > 0 else "N/A"})
                 progress_bar.update(10)
+
             if iteration == opt.iterations: progress_bar.close()
+
             metrics = {}
             for l in loss: metrics["loss_" + l] = loss[l].item()
-            for param_group in gaussians.optimizer.param_groups: metrics[f"lr_{param_group['name']}"] = param_group["lr"]
+            for param_group in gaussians.optimizer.param_groups: metrics[f"lr_{param_group['name']}"] = param_group[
+                "lr"]
             if roi_management_active and gaussians.get_roi_confidence.numel() > 0:
                 metrics["confidence_avg"] = gaussians.get_roi_confidence.mean().item()
                 metrics["confidence_max"] = gaussians.get_roi_confidence.max().item()
                 metrics["confidence_min"] = gaussians.get_roi_confidence.min().item()
-            training_report(tb_writer, iteration, metrics, iter_start.elapsed_time(iter_end), testing_iterations, scene, lambda x, y: render(x, y, pipe), queryfunc)
+            training_report(tb_writer, iteration, metrics, iter_start.elapsed_time(iter_end), testing_iterations, scene,
+                            lambda x, y: render(x, y, pipe), queryfunc)
 
-def training_report(tb_writer, iteration, metrics_train, elapsed, testing_iterations, scene: Scene, renderFunc, queryFunc):
+
+def training_report(tb_writer, iteration, metrics_train, elapsed, testing_iterations, scene: Scene, renderFunc,
+                    queryFunc):
     if tb_writer:
         for key in list(metrics_train.keys()): tb_writer.add_scalar(f"train/{key}", metrics_train[key], iteration)
         tb_writer.add_scalar("train/iter_time", elapsed, iteration)
         tb_writer.add_scalar("train/total_points", scene.gaussians.get_xyz.shape[0], iteration)
+
     if iteration in testing_iterations:
         eval_save_path = osp.join(scene.model_path, "eval", f"iter_{iteration:06d}")
         os.makedirs(eval_save_path, exist_ok=True)
         torch.cuda.empty_cache()
-        validation_configs = [{"name": "render_train", "cameras": scene.getTrainCameras()}, {"name": "render_test", "cameras": scene.getTestCameras()}]
+        validation_configs = [{"name": "render_train", "cameras": scene.getTrainCameras()},
+                              {"name": "render_test", "cameras": scene.getTestCameras()}]
         psnr_2d, ssim_2d, lpips_2d = None, None, None
+
         for config in validation_configs:
             if config["cameras"] and len(config["cameras"]) > 0:
                 images, gt_images, image_show_2d = [], [], []
@@ -310,31 +305,57 @@ def training_report(tb_writer, iteration, metrics_train, elapsed, testing_iterat
                     gt_image = viewpoint.original_image.to("cuda")
                     images.append(image)
                     gt_images.append(gt_image)
-                    if tb_writer and idx in show_idx: image_show_2d.append(torch.from_numpy(show_two_slice(gt_image[0], image[0], f"{viewpoint.image_name} gt", f"{viewpoint.image_name} render", save=True)))
-                images, gt_images = torch.concat(images, 0).permute(1, 2, 0), torch.concat(gt_images, 0).permute(1, 2, 0)
+                    if tb_writer and idx in show_idx: image_show_2d.append(torch.from_numpy(
+                        show_two_slice(gt_image[0], image[0], f"{viewpoint.image_name} gt",
+                                       f"{viewpoint.image_name} render", save=True)))
+
+                images, gt_images = torch.concat(images, 0).permute(1, 2, 0), torch.concat(gt_images, 0).permute(1, 2,
+                                                                                                                 0)
                 psnr_2d, psnr_2d_projs = metric_proj(gt_images, images, "psnr")
                 ssim_2d, ssim_2d_projs = metric_proj(gt_images, images, "ssim")
-                # 【修复】现在直接传递 "lpips" 字符串
                 lpips_2d, lpips_2d_projs = metric_proj(gt_images, images, "lpips")
-                eval_dict_2d = {"psnr_2d": psnr_2d, "ssim_2d": ssim_2d, "lpips_2d": lpips_2d, "psnr_2d_projs": psnr_2d_projs, "ssim_2d_projs": ssim_2d_projs, "lpips_2d_projs": lpips_2d_projs}
-                with open(osp.join(eval_save_path, f"eval2d_{config['name']}.yml"), "w") as f: yaml.dump(eval_dict_2d, f, default_flow_style=False, sort_keys=False)
+                eval_dict_2d = {"psnr_2d": psnr_2d, "ssim_2d": ssim_2d, "lpips_2d": lpips_2d,
+                                "psnr_2d_projs": psnr_2d_projs, "ssim_2d_projs": ssim_2d_projs,
+                                "lpips_2d_projs": lpips_2d_projs}
+                with open(osp.join(eval_save_path, f"eval2d_{config['name']}.yml"), "w") as f:
+                    yaml.dump(eval_dict_2d, f, default_flow_style=False, sort_keys=False)
+
                 if tb_writer:
                     if image_show_2d:
-                        image_show_2d_tensor = torch.from_numpy(np.concatenate(image_show_2d, axis=0))[None].permute([0, 3, 1, 2])
-                        tb_writer.add_images(config["name"] + f"/{viewpoint.image_name}", image_show_2d_tensor, global_step=iteration)
-                    tb_writer.add_scalar(config["name"] + "/psnr_2d", psnr_2d, iteration); tb_writer.add_scalar(config["name"] + "/ssim_2d", ssim_2d, iteration); tb_writer.add_scalar(config["name"] + "/lpips_2d", lpips_2d, iteration)
-        vol_pred = queryFunc(scene.gaussians)["vol"]; vol_gt = scene.vol_gt
-        psnr_3d, _ = metric_vol(vol_gt, vol_pred, "psnr"); ssim_3d, ssim_3d_axis = metric_vol(vol_gt, vol_pred, "ssim")
-        # 【修复】现在直接传递 "lpips" 字符串
+                        image_show_2d_tensor = torch.from_numpy(np.concatenate(image_show_2d, axis=0))[None].permute(
+                            [0, 3, 1, 2])
+                        tb_writer.add_images(config["name"] + f"/{viewpoint.image_name}", image_show_2d_tensor,
+                                             global_step=iteration)
+                    tb_writer.add_scalar(config["name"] + "/psnr_2d", psnr_2d, iteration);
+                    tb_writer.add_scalar(config["name"] + "/ssim_2d", ssim_2d, iteration);
+                    tb_writer.add_scalar(config["name"] + "/lpips_2d", lpips_2d, iteration)
+
+        vol_pred = queryFunc(scene.gaussians)["vol"];
+        vol_gt = scene.vol_gt
+        psnr_3d, _ = metric_vol(vol_gt, vol_pred, "psnr");
+        ssim_3d, ssim_3d_axis = metric_vol(vol_gt, vol_pred, "ssim")
         lpips_3d, lpips_3d_axis = metric_vol(vol_gt, vol_pred, "lpips")
-        eval_dict = {"psnr_3d": psnr_3d, "ssim_3d": ssim_3d, "lpips_3d": lpips_3d, "ssim_3d_x": ssim_3d_axis[0], "ssim_3d_y": ssim_3d_axis[1], "ssim_3d_z": ssim_3d_axis[2], "lpips_3d_x": lpips_3d_axis[0] if lpips_3d_axis else None, "lpips_3d_y": lpips_3d_axis[1] if lpips_3d_axis else None, "lpips_3d_z": lpips_3d_axis[2] if lpips_3d_axis else None}
-        with open(osp.join(eval_save_path, "eval3d.yml"), "w") as f: yaml.dump(eval_dict, f, default_flow_style=False, sort_keys=False)
+        eval_dict = {"psnr_3d": psnr_3d, "ssim_3d": ssim_3d, "lpips_3d": lpips_3d, "ssim_3d_x": ssim_3d_axis[0],
+                     "ssim_3d_y": ssim_3d_axis[1], "ssim_3d_z": ssim_3d_axis[2],
+                     "lpips_3d_x": lpips_3d_axis[0] if lpips_3d_axis else None,
+                     "lpips_3d_y": lpips_3d_axis[1] if lpips_3d_axis else None,
+                     "lpips_3d_z": lpips_3d_axis[2] if lpips_3d_axis else None}
+        with open(osp.join(eval_save_path, "eval3d.yml"), "w") as f:
+            yaml.dump(eval_dict, f, default_flow_style=False, sort_keys=False)
+
         if tb_writer:
-            image_show_3d = np.concatenate([show_two_slice(vol_gt[..., i], vol_pred[..., i], f"slice {i} gt", f"slice {i} pred", vmin=vol_gt[..., i].min(), vmax=vol_gt[..., i].max(), save=True) for i in np.linspace(0, vol_gt.shape[2], 7).astype(int)[1:-1]], axis=0)
+            image_show_3d = np.concatenate([show_two_slice(vol_gt[..., i], vol_pred[..., i], f"slice {i} gt",
+                                                           f"slice {i} pred", vmin=vol_gt[..., i].min(),
+                                                           vmax=vol_gt[..., i].max(), save=True) for i in
+                                            np.linspace(0, vol_gt.shape[2], 7).astype(int)[1:-1]], axis=0)
             image_show_3d = torch.from_numpy(image_show_3d)[None].permute([0, 3, 1, 2])
             tb_writer.add_images("reconstruction/slice-gt_pred_diff", image_show_3d, global_step=iteration)
-            tb_writer.add_scalar("reconstruction/psnr_3d", psnr_3d, iteration); tb_writer.add_scalar("reconstruction/ssim_3d", ssim_3d, iteration); tb_writer.add_scalar("reconstruction/lpips_3d", lpips_3d, iteration)
-        tqdm.write(f"[ITER {iteration}] Evaluating: psnr3d {psnr_3d:.3f}, ssim3d {ssim_3d:.3f}, lpips3d {lpips_3d:.3f}, psnr2d {psnr_2d:.3f}, ssim2d {ssim_2d:.3f}, lpips2d {lpips_2d:.3f}")
+            tb_writer.add_scalar("reconstruction/psnr_3d", psnr_3d, iteration);
+            tb_writer.add_scalar("reconstruction/ssim_3d", ssim_3d, iteration);
+            tb_writer.add_scalar("reconstruction/lpips_3d", lpips_3d, iteration)
+
+        tqdm.write(
+            f"[ITER {iteration}] Evaluating: psnr3d {psnr_3d:.3f}, ssim3d {ssim_3d:.3f}, lpips3d {lpips_3d:.3f}, psnr2d {psnr_2d:.3f}, ssim2d {ssim_2d:.3f}, lpips2d {lpips_2d:.3f}")
         if tb_writer: tb_writer.add_histogram("scene/density_histogram", scene.gaussians.get_density, iteration)
     torch.cuda.empty_cache()
 
@@ -355,17 +376,11 @@ if __name__ == "__main__":
     parser.add_argument("--plot_confidence", action="store_true", help="在训练结束时生成并保存置信度分布直方图。")
     parser.add_argument("--roi_update_start_iter", type=int, default=5000,help="Iteration to start ROI confidence updates.")
     parser.add_argument('--auto_mask', action='store_true',help="如果设置此项，将自动检查并生成ROI掩码。")
-    parser.add_argument('--mask_soft_p', type=int, default=30,help="自动生成软组织掩码的百分位数。")
-    parser.add_argument('--mask_core_p', type=int, default=50,help="自动生成核心骨架掩码的百分位数。")
     parser.add_argument('--no_previews', dest='save_previews', action='store_false',help="设置此项后，将不生成PNG格式的掩码预览图，只生成NPY文件。")
     parser.set_defaults(save_previews=True)
 
     op_group = parser.add_argument_group("Optimization", "Optimization parameters")
-    # op_group.add_argument("--intelligent_confidence_mode", type=str, default='percentile',
-    #                       choices=['none', 'fixed', 'percentile'],
-    #                       help="智能置信度初始化模式: 'none' (关闭), 'fixed' (使用固定阈值), 'percentile' (使用百分位法，推荐)。")
-    # op_group.add_argument("--intelligent_confidence_percentile", type=float, default=5.0,
-    #                       help="当模式为 'percentile' 时，定义要识别为核心点的最高密度点的百分比 (例如, 5.0 代表前5%%)。")
+
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
