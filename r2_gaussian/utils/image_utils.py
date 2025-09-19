@@ -73,7 +73,8 @@ def psnr(img1, img2, mask=None, pixel_max=1.0):
 def metric_vol(gt_vol, pred_vol, metric="psnr", pixel_max=1.0):
     """
     【已修复】计算体积指标。
-    修复了LPIPS计算中因permute维度不匹配导致的RuntimeError。
+    - 修复了SSIM在处理包含大片纯色区域（如CT空气）时因除零错误导致'nan'的问题。
+    - 修复了LPIPS计算中因permute维度不匹配导致的RuntimeError。
     """
     assert metric in ["psnr", "ssim", "lpips"]
     if isinstance(gt_vol, np.ndarray): gt_vol = torch.from_numpy(gt_vol.copy())
@@ -82,14 +83,25 @@ def metric_vol(gt_vol, pred_vol, metric="psnr", pixel_max=1.0):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     gt_vol, pred_vol = gt_vol.to(device), pred_vol.to(device)
 
+    # 在计算所有指标前，进行一次统一的归一化，确保数据在 [0, 1] 范围
+    gt_min, gt_max = gt_vol.min(), gt_vol.max()
+    if gt_max > gt_min:
+        gt_vol = (gt_vol - gt_min) / (gt_max - gt_min)
+        # 使用gt的范围来归一化pred，保持一致性
+        pred_vol = (pred_vol - gt_min) / (gt_max - gt_min)
+
+    # 将预测值裁剪到 [0, 1] 范围，防止超出
+    pred_vol = torch.clamp(pred_vol, 0, 1)
+
     if metric == "psnr":
-        pixel_max_val = pixel_max if pixel_max is not None else gt_vol.max().item()
+        # 数据已归一化到[0,1]，所以 pixel_max 固定为 1.0
         mse_val = torch.mean((gt_vol - pred_vol) ** 2)
         if mse_val == 0: return float('inf'), None
-        psnr_val = 10 * torch.log10(pixel_max_val ** 2 / mse_val.float())
+        psnr_val = 10 * torch.log10(1.0 ** 2 / mse_val.float())
         return psnr_val.item(), None
 
     elif metric == "ssim":
+        # <<< 核心修复：使用固定的 data_range=1.0 >>>
         ssims = []
         for axis in [0, 1, 2]:
             gt_slices = torch.unbind(gt_vol, dim=axis)
@@ -97,41 +109,37 @@ def metric_vol(gt_vol, pred_vol, metric="psnr", pixel_max=1.0):
             axis_ssims = []
             for s_gt, s_pred in zip(gt_slices, pred_slices):
                 s_gt_np, s_pred_np = s_gt.cpu().numpy(), s_pred.cpu().numpy()
-                data_range = s_gt_np.max() - s_gt_np.min()
-                if data_range > 0:
-                    axis_ssims.append(structural_similarity(s_gt_np, s_pred_np, data_range=data_range))
+
+                # 直接使用 data_range=1.0，不再动态计算。
+                # 这能让 skimage 内部处理好数值稳定性问题。
+                # 我们也不再需要 `if data_range > 0:` 的判断。
+                ssim_value = structural_similarity(s_gt_np, s_pred_np, data_range=1.0)
+                axis_ssims.append(ssim_value)
+
             if axis_ssims: ssims.append(np.mean(axis_ssims))
+
+        # 如果ssims列表为空（例如体积太小），返回0.0
         return np.mean(ssims) if ssims else 0.0, ssims
 
     elif metric == "lpips":
         if not LPIPS_AVAILABLE: return float('nan'), [float('nan')] * 3
 
         lpips_scores = []
-        # 假设体积数据维度为 (D, H, W) 或 (H, W, D)
-        # 我们将沿三个轴向切片来计算LPIPS
+        # 数据已在函数开头归一化，这里直接使用
         for axis in [0, 1, 2]:
-            # --- 核心修复：根据axis正确地重排3D体积为2D切片批次 ---
-            if axis == 0:  # 沿第一个轴切片
+            if axis == 0:
                 gt_slices = gt_vol.unsqueeze(1)
                 pred_slices = pred_vol.unsqueeze(1)
-            elif axis == 1:  # 沿第二个轴切片
+            elif axis == 1:
                 gt_slices = gt_vol.permute(1, 0, 2).unsqueeze(1)
                 pred_slices = pred_vol.permute(1, 0, 2).unsqueeze(1)
-            else:  # axis == 2, 沿第三个轴切片
+            else:
                 gt_slices = gt_vol.permute(2, 0, 1).unsqueeze(1)
                 pred_slices = pred_vol.permute(2, 0, 1).unsqueeze(1)
 
-            # 归一化到 [0, 1] 以输入LPIPS模型
-            gt_min, gt_max = gt_vol.min(), gt_vol.max()
-            if gt_max > gt_min:
-                gt_slices = (gt_slices - gt_min) / (gt_max - gt_min)
-                pred_slices = (pred_slices - gt_min) / (gt_max - gt_min)
-
-            # LPIPS需要3通道图像
             gt_slices = gt_slices.repeat(1, 3, 1, 1)
             pred_slices = pred_slices.repeat(1, 3, 1, 1)
 
-            # 分批计算以防显存爆炸
             batch_size = 32
             axis_lpips = []
             for i in range(0, gt_slices.shape[0], batch_size):

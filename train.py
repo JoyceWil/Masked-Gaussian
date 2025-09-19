@@ -24,10 +24,6 @@ from r2_gaussian.utils.mask_generator import check_and_generate_masks
 
 def plot_and_save_confidence_distribution(confidence_data, iteration, output_dir, protect_threshold,
                                           candidate_threshold):
-    """
-    【修正版】生成并保存高斯点置信度的分布直方图。
-    移除了固定的range，让matplotlib自动适应数据的完整范围。
-    """
     if confidence_data.size == 0:
         print("[WARNING] Confidence data is empty, skipping plot generation.")
         return
@@ -72,7 +68,7 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     roi_management_active = scene.use_roi_masks
     if roi_management_active:
         print("ROI置信度管理已在训练流程中激活。")
-        # 这部分现在只是信息展示，实际的奖励值直接在调用时传递
+
         confidence_thresholds = {"prune": opt.roi_prune_threshold, "protect": opt.roi_protect_threshold}
         rewards = {"penalty": opt.roi_background_reward, "standard": opt.roi_standard_reward,
                    "core_bonus": opt.roi_core_bonus_reward}
@@ -90,7 +86,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
     initialize_gaussian(gaussians, dataset, None)
 
     if opt.intelligent_confidence_mode != 'none':
-        print(f"\n--- [智能置信度初始化模块] ---")
         print(f"模式: {opt.intelligent_confidence_mode}")
 
         with torch.no_grad():
@@ -142,7 +137,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                     f"操作完成: {target_indices.numel()} / {initial_xyz.shape[0]} 个点被识别为核心点，并赋予了 {initial_reward:.2f} 的初始置信度。")
             else:
                 print("警告: 没有一个初始点落在FDK体积内，无法进行智能置信度初始化。")
-        print(f"--- [初始化结束] ---\n")
 
     scene.gaussians = gaussians
     gaussians.training_setup(opt)
@@ -200,9 +194,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
 
         with torch.no_grad():
             if roi_management_active and iteration >= args.roi_update_start_iter and iteration % opt.roi_management_interval == 0:
-                # --- 【核心修改】 ---
-                # 移除了所有与 air_mask 和 air_penalty 相关的逻辑。
-                # 函数调用变得更简洁，只传递新策略需要的参数。
                 gaussians.update_roi_confidence(
                     render_pkg,
                     viewpoint_cam,
@@ -210,7 +201,6 @@ def training(args, dataset: ModelParams, opt: OptimizationParams, pipe: Pipeline
                     opt.roi_core_bonus_reward,
                     opt.roi_background_reward
                 )
-                # --- 【修改结束】 ---
 
             visibility_filter = render_pkg["visibility_filter"]
             radii = render_pkg["radii"]
@@ -374,13 +364,21 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--gpu_id", type=int, default=0, help="指定要使用的GPU ID")
     parser.add_argument("--plot_confidence", action="store_true", help="在训练结束时生成并保存置信度分布直方图。")
-    parser.add_argument("--roi_update_start_iter", type=int, default=5000,help="Iteration to start ROI confidence updates.")
-    parser.add_argument('--auto_mask', action='store_true',help="如果设置此项，将自动检查并生成ROI掩码。")
-    parser.add_argument('--no_previews', dest='save_previews', action='store_false',help="设置此项后，将不生成PNG格式的掩码预览图，只生成NPY文件。")
+    parser.add_argument("--roi_update_start_iter", type=int, default=5000,
+                        help="Iteration to start ROI confidence updates.")
+    parser.add_argument('--auto_mask', action='store_true', help="如果设置此项，将自动检查并生成ROI掩码。")
+    parser.add_argument('--no_previews', dest='save_previews', action='store_false',
+                        help="设置此项后，将不生成PNG格式的掩码预览图，只生成NPY文件。")
     parser.set_defaults(save_previews=True)
+    parser.add_argument("--noisy_view_indices", type=int, nargs='+', default=None,
+                        help="一个或多个训练视图的索引，只有这些视图会被添加噪声。如果未提供，则噪声会应用于所有视图。")
+
+    parser.add_argument('--mask_bone_wl', type=int, default=380, help="核心骨架掩码的窗位 (Window Level)。")
+    parser.add_argument('--mask_bone_ww', type=int, default=380, help="核心骨架掩码的窗宽 (Window Width)。")
+    parser.add_argument('--mask_tissue_wl', type=int, default=40, help="软组织掩码的窗位 (Window Level)。")
+    parser.add_argument('--mask_tissue_ww', type=int, default=400, help="软组织掩码的窗宽 (Window Width)。")
 
     op_group = parser.add_argument_group("Optimization", "Optimization parameters")
-
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -399,241 +397,87 @@ if __name__ == "__main__":
 
     if args.auto_mask:
         print("\n--- [自动化ROI掩码处理模块] ---")
-        # 确保数据源路径已在配置中定义
         if not hasattr(args, 'source_path') or not args.source_path:
             print("错误: 必须在配置文件中定义 'source_path' 才能使用 --auto_mask。")
             sys.exit(1)
 
-        try:
-            # 调用我们的生成器函数
-            soft_mask_dir, core_mask_dir = check_and_generate_masks(
-                source_path=args.source_path,
-                soft_p=args.mask_soft_p,
-                core_p=args.mask_core_p,
-                save_png_previews=args.save_previews
-            )
+        # 1. 定义预期的掩码目录路径
+        base_mask_dir = osp.join(args.source_path, "masks")
+        expected_soft_mask_dir = osp.join(base_mask_dir, "tissue_masks_npy")
+        expected_core_mask_dir = osp.join(base_mask_dir, "bone_masks_npy")
 
-            # 【关键步骤】: 动态更新args对象，将生成的路径注入到配置中
-            args.soft_mask_dir = soft_mask_dir
-            args.core_mask_dir = core_mask_dir
+        # 2. 检查这些目录是否已经存在且非空
+        if osp.exists(expected_soft_mask_dir) and osp.exists(expected_core_mask_dir) and \
+                len(os.listdir(expected_soft_mask_dir)) > 0 and len(os.listdir(expected_core_mask_dir)) > 0:
 
-            print("   - 配置已动态更新为使用以下NPY掩码目录:")
-            print(f"     - 软组织: {args.soft_mask_dir}")
-            print(f"     - 核心骨架: {args.core_mask_dir}")
+            print("   - 状态: 已找到预先生成的软掩码目录，将直接使用。")
+            args.soft_mask_dir = expected_soft_mask_dir
+            args.core_mask_dir = expected_core_mask_dir
 
-        except Exception as e:
-            print(f"错误：掩码生成失败: {e}")
-            print("训练已终止。")
-            sys.exit(1)
-        print("--- [掩码处理完毕] ---\n")
+        else:
+            # 3. 如果目录不存在或为空，则进入生成流程
+            print("   - 状态: 未找到有效的软掩码目录，开始自动生成...")
+            try:
+                # 调用我们新的、基于窗宽窗位的生成函数
+                generated_soft_dir, generated_core_dir = check_and_generate_masks(
+                    source_path=args.source_path,
+                    bone_wl=args.mask_bone_wl,
+                    bone_ww=args.mask_bone_ww,
+                    tissue_wl=args.mask_tissue_wl,
+                    tissue_ww=args.mask_tissue_ww,
+                    save_png_previews=args.save_previews
+                )
+
+                args.soft_mask_dir = generated_soft_dir
+                args.core_mask_dir = generated_core_dir
+                print("   - 生成成功！")
+
+            except Exception as e:
+                print(f"   - 错误：掩码生成失败: {e}")
+                import traceback
+
+                traceback.print_exc()
+                print("   - 训练已终止。")
+                sys.exit(1)
+
+        # 4. 最终确认使用的目录
+        print("   - 配置已确认，将使用以下NPY掩码目录:")
+        print(f"     - 软组织 (Soft): {args.soft_mask_dir}")
+        print(f"     - 核心骨架 (Core): {args.core_mask_dir}")
 
     tb_writer = prepare_output_and_logger(args)
     print("Optimizing " + args.model_path)
+    final_model_params = lp.extract(args)
+    print(f"  [INFO] Effective noise level for this run: {final_model_params.noise_level}")
+    if final_model_params.noise_level is not None and final_model_params.noise_level > 0:
+        print("  [STATUS] Noise injection is ACTIVE.")
+        print("           Look for '[DEBUG] 噪声可视化已保存！' message during data loading.")
+    else:
+        print("  [STATUS] Noise injection is INACTIVE (level is 0 or None).")
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    dataset = lp.extract(args)
+    dataset = final_model_params
     opt = op.extract(args)
     pipe = pp.extract(args)
 
-    # 【修改】将args也传递给training函数
     training(
         args, dataset, opt, pipe, tb_writer,
         args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint
     )
 
-    # 在点云可视化之前执行CT切片可视化
-    print("训练完成，准备执行CT切片可视化...")
-
-    # 获取最后一次迭代的模型结果
     if args.save_iterations:
+        # 获取最终迭代次数和TensorBoard writer
         latest_iter = max(args.save_iterations)
 
-        # 尝试加载体积数据
-        vol_paths = []
+        # 运行点云可视化
+        from point_cloud_visualizer import on_training_finish
 
-        # 优先从eval目录查找
-        eval_dir = os.path.join(args.model_path, "eval", f"iter_{latest_iter}")
-        if os.path.exists(eval_dir):
-            vol_pred_path = os.path.join(eval_dir, "vol_pred.npy")
-            vol_gt_path = os.path.join(eval_dir, "vol_gt.npy")
-            if os.path.exists(vol_pred_path) and os.path.exists(vol_gt_path):
-                vol_paths = [vol_pred_path, vol_gt_path]
-
-        # 如果eval目录没有找到，从point_cloud目录查找
-        if not vol_paths:
-            point_cloud_dir = os.path.join(args.model_path, "point_cloud", f"iteration_{latest_iter}")
-            if os.path.exists(point_cloud_dir):
-                vol_pred_path = os.path.join(point_cloud_dir, "vol_pred.npy")
-                vol_gt_path = os.path.join(point_cloud_dir, "vol_gt.npy")
-                if os.path.exists(vol_pred_path) and os.path.exists(vol_gt_path):
-                    vol_paths = [vol_pred_path, vol_gt_path]
-
-        # 如果还没找到，需要重新生成体积数据
-        if not vol_paths:
-            print("找不到体积数据，尝试重新生成...")
-
-        # 如果成功找到或生成了体积数据，进行可视化
-        if vol_paths:
-            print(f"加载体积数据: {vol_paths}")
-            vol_pred = np.load(vol_paths[0])
-            vol_gt = np.load(vol_paths[1])
-
-            print(f"体积数据形状 - 预测: {vol_pred.shape}, 真实: {vol_gt.shape}")
-
-            # 创建保存目录
-            ct_viz_dir = os.path.join(args.model_path, "ct_viz")
-            os.makedirs(ct_viz_dir, exist_ok=True)
-
-            # 创建三个轴向的目录
-            axial_dir = os.path.join(ct_viz_dir, "axial")
-            coronal_dir = os.path.join(ct_viz_dir, "coronal")
-            sagittal_dir = os.path.join(ct_viz_dir, "sagittal")
-
-            for d in [axial_dir, coronal_dir, sagittal_dir]:
-                os.makedirs(d, exist_ok=True)
-
-            # 归一化体积数据用于可视化
-            vol_pred_norm = vol_pred.copy()
-            vol_gt_norm = vol_gt.copy()
-
-            if vol_pred_norm.max() > vol_pred_norm.min():
-                vol_pred_norm = (vol_pred_norm - vol_pred_norm.min()) / (vol_pred_norm.max() - vol_pred_norm.min())
-            if vol_gt_norm.max() > vol_gt_norm.min():
-                vol_gt_norm = (vol_gt_norm - vol_gt_norm.min()) / (vol_gt_norm.max() - vol_gt_norm.min())
-
-            print(
-                f"归一化后 - 预测: {vol_pred_norm.min():.4f}-{vol_pred_norm.max():.4f}, 真实: {vol_gt_norm.min():.4f}-{vol_gt_norm.max():.4f}")
-
-            # 生成CT切片可视化
-            import matplotlib.pyplot as plt
-
-            # 为每个方向选择5个切片
-            show_slice = 5
-
-            # 获取每个维度的大小
-            depth_z = vol_gt_norm.shape[2]  # Z轴（轴状位）
-            depth_y = vol_gt_norm.shape[1]  # Y轴（冠状位）
-            depth_x = vol_gt_norm.shape[0]  # X轴（矢状位）
-
-            # 计算每个方向的步长
-            step_z = max(1, depth_z // show_slice)
-            step_y = max(1, depth_y // show_slice)
-            step_x = max(1, depth_x // show_slice)
-
-
-            # 定义处理每个轴向的函数，以避免代码重复
-            def process_slices(vol_gt, vol_pred, axis_name, axis_idx, step, output_dir):
-                plt.figure(figsize=(15, 6))
-                combined_slices = []
-
-                for i in range(show_slice):
-                    slice_idx = min((i + 1) * step - 1, axis_idx - 1)  # 确保不超出边界
-
-                    # 根据轴向获取切片
-                    if axis_name == "axial":
-                        gt_slice = vol_gt[..., slice_idx]
-                        pred_slice = vol_pred[..., slice_idx]
-                    elif axis_name == "coronal":
-                        gt_slice = vol_gt[:, slice_idx, :]
-                        pred_slice = vol_pred[:, slice_idx, :]
-                    else:  # sagittal
-                        gt_slice = vol_gt[slice_idx, :, :]
-                        pred_slice = vol_pred[slice_idx, :, :]
-
-                    # 创建组合图像，GT在上，预测在下
-                    plt.subplot(2, show_slice, i + 1)
-                    plt.imshow(gt_slice, cmap='gray')
-                    plt.title(f"GT {axis_name.capitalize()} {slice_idx}")
-                    plt.axis('off')
-
-                    plt.subplot(2, show_slice, i + 1 + show_slice)
-                    plt.imshow(pred_slice, cmap='gray')
-                    plt.title(f"Pred {axis_name.capitalize()} {slice_idx}")
-                    plt.axis('off')
-
-                    # 保存单独的切片图像
-                    plt.figure(figsize=(10, 10))
-                    plt.subplot(2, 1, 1)
-                    plt.imshow(gt_slice, cmap='gray')
-                    plt.title(f"GT {axis_name.capitalize()} {slice_idx}")
-                    plt.axis('off')
-
-                    plt.subplot(2, 1, 2)
-                    plt.imshow(pred_slice, cmap='gray')
-                    plt.title(f"Pred {axis_name.capitalize()} {slice_idx}")
-                    plt.axis('off')
-
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(output_dir, f"{axis_name}_slice_{slice_idx}.png"), dpi=200,
-                                bbox_inches='tight')
-                    plt.close()
-
-                    # 创建与示例代码一致的可视化
-                    combined_slice = np.vstack([gt_slice, pred_slice])
-                    combined_slices.append(combined_slice)
-
-                # 返回到主图形
-                plt.figure(figsize=(15, 6))
-
-                # 将所有切片水平连接
-                all_slices = np.hstack(combined_slices)
-
-                # 保存组合图像
-                plt.figure(figsize=(15, 6))
-                plt.imshow(all_slices, cmap='gray')
-                plt.title(f"CT {axis_name.capitalize()} Slices (Top: GT, Bottom: Prediction)")
-                plt.axis('off')
-                plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, f"all_{axis_name}_slices.png"), dpi=200, bbox_inches='tight')
-                plt.close()
-
-                return all_slices
-
-
-            # 处理三个方向的切片
-            print("生成轴状位(Axial)切片...")
-            axial_slices = process_slices(vol_gt_norm, vol_pred_norm, "axial", depth_z, step_z, axial_dir)
-
-            print("生成冠状位(Coronal)切片...")
-            coronal_slices = process_slices(vol_gt_norm, vol_pred_norm, "coronal", depth_y, step_y, coronal_dir)
-
-            print("生成矢状位(Sagittal)切片...")
-            sagittal_slices = process_slices(vol_gt_norm, vol_pred_norm, "sagittal", depth_x, step_x, sagittal_dir)
-
-            # 创建一个综合可视化，包含所有三个方向
-            plt.figure(figsize=(15, 15))
-
-            # 将三个方向的切片垂直堆叠
-            all_directions = np.vstack([axial_slices, coronal_slices, sagittal_slices])
-
-            plt.imshow(all_directions, cmap='gray')
-            plt.title("CT Slices - All Directions\n(Top: Axial, Middle: Coronal, Bottom: Sagittal)")
-            plt.axis('off')
-            plt.tight_layout()
-            plt.savefig(os.path.join(ct_viz_dir, "all_directions.png"), dpi=300, bbox_inches='tight')
-            plt.close()
-
-            print(f"CT切片可视化已保存到: {ct_viz_dir}")
-
-            # 添加到TensorBoard
-            if tb_writer:
-                # 单独添加每个方向
-                for name, slices in [("axial", axial_slices), ("coronal", coronal_slices),
-                                     ("sagittal", sagittal_slices)]:
-                    slices_tensor = torch.from_numpy(slices)[None, ..., None]
-                    slices_rgb = torch.cat([slices_tensor, slices_tensor, slices_tensor], dim=3)
-                    tb_writer.add_image(f"ct_viz/{name}_slices", slices_rgb[0], global_step=latest_iter,
-                                        dataformats="HWC")
-
-                # 添加所有方向的综合图
-                all_dir_tensor = torch.from_numpy(all_directions)[None, ..., None]
-                all_dir_rgb = torch.cat([all_dir_tensor, all_dir_tensor, all_dir_tensor], dim=3)
-                tb_writer.add_image("ct_viz/all_directions", all_dir_rgb[0], global_step=latest_iter, dataformats="HWC")
-
-    # 运行点云可视化
-    from point_cloud_visualizer import on_training_finish
-
-    on_training_finish(args.model_path)
+        # 使用新的函数签名，传递所有需要的参数
+        on_training_finish(
+            model_path=args.model_path,
+            latest_iter=latest_iter,
+            tb_writer=tb_writer
+        )
 
     # 完成
-    print("所有处理步骤完成。")
+    print("\n所有处理步骤完成。")

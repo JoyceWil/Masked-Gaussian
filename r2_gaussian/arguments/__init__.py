@@ -18,11 +18,10 @@ class ModelParams(ParamGroup):
         self.scale_max = 0.5
         self.eval = True
 
-        # --- 【核心修改 1】 ---
-        # 只保留我们需要的两个掩码参数，并移除 air_mask_dir
         self.soft_mask_dir = ""
         self.core_mask_dir = ""
-        # --- 【修改结束】 ---
+
+        self.noise_level = 0.0
 
         super().__init__(parser, "Loading Parameters", sentinel)
 

@@ -1,118 +1,144 @@
-import cv2
-import numpy as np
+# r2_gaussian/utils/mask_generator.py (最终集成版)
 import os
+import os.path as osp
+import sys
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
-def _generate_single_mask_set(projection_data: np.ndarray, soft_p: int, core_p: int):
+# 将您脚本中的核心函数直接移入此处，并添加文档字符串
+def convert_mu_to_hu(mu_image: np.ndarray) -> np.ndarray:
     """
-    【内部函数】为单张投影生成软组织和核心骨架掩码。(逻辑保持不变)
+    将原始的mu值（衰减系数）图像通过线性映射转换为HU（亨氏单位）图像。
+    这个映射是基于图像本身的最大和最小值。
+
+    Args:
+        mu_image (np.ndarray): 包含原始mu值的输入图像。
+
+    Returns:
+        np.ndarray: 转换后的HU值图像。
     """
-    # 步骤1: 使用Otsu阈值法获取精确的初始轮廓
-    p_min, p_max = projection_data.min(), projection_data.max()
-    if p_max <= p_min:
-        empty_mask = np.zeros_like(projection_data, dtype=np.uint8)
-        return empty_mask, empty_mask
+    HU_AIR = -1000.0
+    HU_HIGH_DENSITY = 1000.0
+    mu_image = np.nan_to_num(mu_image)
+    mu_min = np.min(mu_image)
+    mu_max = np.max(mu_image)
 
-    normalized_data = (255 * (projection_data - p_min) / (p_max - p_min)).astype(np.uint8)
-    _, binary_mask_255 = cv2.threshold(normalized_data, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    base_mask_for_analysis = cv2.morphologyEx(binary_mask_255, cv2.MORPH_CLOSE, kernel, iterations=3)
-    base_mask_for_analysis = (base_mask_for_analysis / 255).astype(np.uint8)
-
-    # 步骤2: 在精确轮廓内计算百分位数
-    object_pixels = projection_data[base_mask_for_analysis == 1]
-    if object_pixels.size == 0:
-        empty_mask = np.zeros_like(projection_data, dtype=np.uint8)
-        return empty_mask, empty_mask
-
-    # 步骤3: 生成掩码
-    soft_threshold = np.percentile(object_pixels, soft_p)
-    soft_mask = np.where(projection_data >= soft_threshold, 1, 0).astype(np.uint8)
-    soft_mask = cv2.bitwise_and(soft_mask, soft_mask, mask=base_mask_for_analysis)
-
-    core_threshold = np.percentile(object_pixels, core_p)
-    core_mask = np.where(projection_data >= core_threshold, 1, 0).astype(np.uint8)
-    core_mask = cv2.bitwise_and(core_mask, core_mask, mask=base_mask_for_analysis)
-
-    core_mask_cleaned = cv2.morphologyEx(core_mask * 255, cv2.MORPH_OPEN, kernel, iterations=1)
-    core_mask_final = (core_mask_cleaned / 255).astype(np.uint8)
-
-    return soft_mask, core_mask_final
+    if mu_max - mu_min < 1e-6:
+        return np.full_like(mu_image, HU_AIR, dtype=np.float32)
+    else:
+        a = (HU_HIGH_DENSITY - HU_AIR) / (mu_max - mu_min)
+        b = HU_AIR - a * mu_min
+        hu_image = a * mu_image + b
+        return hu_image.astype(np.float32)
 
 
+def apply_windowing(hu_image: np.ndarray, window_level: int, window_width: int) -> np.ndarray:
+    """
+    根据给定的窗位(WL)和窗宽(WW)将HU值图像转换为归一化的[0, 1]软掩码。
+
+    Args:
+        hu_image (np.ndarray): HU值图像。
+        window_level (int): 窗位 (Window Level)。
+        window_width (int): 窗宽 (Window Width)。
+
+    Returns:
+        np.ndarray: 归一化后的软掩码。
+    """
+    min_hu = window_level - (window_width / 2.0)
+    max_hu = window_level + (window_width / 2.0)
+
+    soft_mask = hu_image.astype(np.float32)
+    np.clip(soft_mask, min_hu, max_hu, out=soft_mask)
+
+    if window_width == 0:
+        return np.zeros_like(soft_mask)
+
+    soft_mask = (soft_mask - min_hu) / window_width
+    return soft_mask
+
+
+# 这是 train.py 将要调用的主函数
 def check_and_generate_masks(
         source_path: str,
-        soft_p: int,
-        core_p: int,
-        save_png_previews: bool = True  # <-- 新增的控制参数
-):
+        bone_wl: int,
+        bone_ww: int,
+        tissue_wl: int,
+        tissue_ww: int,
+        save_png_previews: bool = True
+) -> (str, str):
     """
-    【主调用函数】检查并按需生成掩码，并返回用于训练的NPY掩码目录路径。
+    检查掩码是否存在，如果不存在则使用窗宽窗位法从原始投影生成软掩码。
 
-    参数:
-        source_path (str): 数据集的根目录。
-        soft_p (int): 软组织掩码的百分位数。
-        core_p (int): 核心骨架掩码的百分位数。
-        save_png_previews (bool): 是否同时保存一份PNG格式的预览图。默认为True。
+    Args:
+        source_path (str): 场景的根目录 (例如 'data/.../0_chest_cone')。
+        bone_wl (int): 骨骼掩码的窗位。
+        bone_ww (int): 骨骼掩码的窗宽。
+        tissue_wl (int): 软组织掩码的窗位。
+        tissue_ww (int): 软组织掩码的窗宽。
+        save_png_previews (bool): 是否保存PNG格式的预览图。
 
-    返回:
-        tuple: (soft_mask_dir_npy, core_mask_dir_npy) 包含NPY掩码的目录路径。
+    Returns:
+        tuple[str, str]: 返回 (软组织掩码目录, 核心骨架掩码目录) 的路径。
     """
-    proj_train_dir = os.path.join(source_path, 'proj_train')
-    mask_base_dir = os.path.join(source_path, 'masks')
+    print("   - 正在执行窗宽窗位软掩码生成流程...")
 
-    # --- 路径定义 (NPY用于训练, PNG用于预览) ---
-    output_dir_soft_npy = os.path.join(mask_base_dir, f'soft_masks_p{soft_p}')
-    output_dir_core_npy = os.path.join(mask_base_dir, f'core_masks_p{core_p}')
+    # 1. 定义所有需要的路径
+    proj_train_dir = osp.join(source_path, 'proj_train')
+    base_mask_dir = osp.join(source_path, 'masks')
 
+    # 核心骨架掩码 (之前叫 bone_mask)
+    core_mask_npy_dir = osp.join(base_mask_dir, 'bone_masks_npy')
+    core_mask_png_dir = osp.join(base_mask_dir, 'bone_masks_png')
+
+    # 软组织掩码 (之前叫 tissue_mask)
+    soft_mask_npy_dir = osp.join(base_mask_dir, 'tissue_masks_npy')
+    soft_mask_png_dir = osp.join(base_mask_dir, 'tissue_masks_png')
+
+    output_dirs = [core_mask_npy_dir, soft_mask_npy_dir]
     if save_png_previews:
-        output_dir_soft_png = os.path.join(mask_base_dir, f'soft_masks_p{soft_p}_previews')
-        output_dir_core_png = os.path.join(mask_base_dir, f'core_masks_p{core_p}_previews')
+        output_dirs.extend([core_mask_png_dir, soft_mask_png_dir])
 
-    # 检查输入目录
-    if not os.path.isdir(proj_train_dir):
-        raise FileNotFoundError(f"错误: 找不到投影目录 '{proj_train_dir}'。")
+    # 2. 准备目录结构
+    print("   - 正在准备输出目录...")
+    for directory in output_dirs:
+        os.makedirs(directory, exist_ok=True)
 
-    # --- 检查逻辑 (只关心NPY文件是否存在) ---
-    try:
-        proj_files = [f for f in os.listdir(proj_train_dir) if f.endswith('.npy')]
-        if (os.path.isdir(output_dir_soft_npy) and os.path.isdir(output_dir_core_npy) and
-                len(os.listdir(output_dir_soft_npy)) == len(proj_files) and
-                len(os.listdir(output_dir_core_npy)) == len(proj_files)):
-            print(f"✅ NPY掩码已存在且数量匹配，跳过生成过程。")
-            return output_dir_soft_npy, output_dir_core_npy
-    except FileNotFoundError:
-        pass
+    # 3. 检查输入并获取文件列表
+    if not osp.isdir(proj_train_dir):
+        raise FileNotFoundError(f"输入目录 '{proj_train_dir}' 不存在！无法生成掩码。")
 
-    # --- 生成逻辑 ---
-    print(f"⚠️  检测到NPY掩码不存在或不完整，开始自动生成...")
-    os.makedirs(output_dir_soft_npy, exist_ok=True)
-    os.makedirs(output_dir_core_npy, exist_ok=True)
-    print(f"   - NPY软组织掩码 (p={soft_p}) 将保存至: '{output_dir_soft_npy}'")
-    print(f"   - NPY核心骨架掩码 (p={core_p}) 将保存至: '{output_dir_core_npy}'")
+    file_list = sorted(glob.glob(osp.join(proj_train_dir, '*.npy')))
+    if not file_list:
+        raise FileNotFoundError(f"在目录 '{proj_train_dir}' 中没有找到任何 .npy 投影文件。")
 
-    if save_png_previews:
-        os.makedirs(output_dir_soft_png, exist_ok=True)
-        os.makedirs(output_dir_core_png, exist_ok=True)
-        print(f"   - PNG预览图将同步保存。")
+    print(f"   - 在 '{proj_train_dir}' 中找到 {len(file_list)} 个投影文件。")
 
-    for filename in tqdm(proj_files, desc=f"生成 p{soft_p}/p{core_p} 掩码"):
-        input_path = os.path.join(proj_train_dir, filename)
-        projection_data = np.load(input_path)
+    # 4. 批处理循环
+    for file_path in tqdm(file_list, desc="   - 生成软掩码", leave=False):
+        base_name = osp.basename(file_path)
+        file_name_without_ext = osp.splitext(base_name)[0]
 
-        soft_mask, core_mask = _generate_single_mask_set(projection_data, soft_p, core_p)
+        original_mu_image = np.load(file_path)
+        hu_image = convert_mu_to_hu(original_mu_image)
 
-        # 1. 保存NPY格式 (用于训练)
-        np.save(os.path.join(output_dir_soft_npy, filename), soft_mask)
-        np.save(os.path.join(output_dir_core_npy, filename), core_mask)
+        core_mask = apply_windowing(hu_image, bone_wl, bone_ww)
+        soft_mask = apply_windowing(hu_image, tissue_wl, tissue_ww)
 
-        # 2. 如果需要，保存PNG格式 (用于预览)
+        # 保存.npy数据
+        np.save(osp.join(core_mask_npy_dir, f"{file_name_without_ext}.npy"), core_mask)
+        np.save(osp.join(soft_mask_npy_dir, f"{file_name_without_ext}.npy"), soft_mask)
+
+        # 如果需要，保存.png可视化文件
         if save_png_previews:
-            png_filename = filename.replace('.npy', '.png')
-            cv2.imwrite(os.path.join(output_dir_soft_png, png_filename), soft_mask * 255)
-            cv2.imwrite(os.path.join(output_dir_core_png, png_filename), core_mask * 255)
+            plt.imsave(osp.join(core_mask_png_dir, f"{file_name_without_ext}.png"), core_mask, cmap='gray', vmin=0,
+                       vmax=1)
+            plt.imsave(osp.join(soft_mask_png_dir, f"{file_name_without_ext}.png"), soft_mask, cmap='gray', vmin=0,
+                       vmax=1)
 
-    print("\n✅ 所有掩码已成功生成并保存。")
-    return output_dir_soft_npy, output_dir_core_npy
+    print(f"   - 所有 {len(file_list)} 个文件的软掩码已成功生成。")
+
+    # 5. 返回生成的NPY目录路径，供 train.py 使用
+    return soft_mask_npy_dir, core_mask_npy_dir
