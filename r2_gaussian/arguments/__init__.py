@@ -58,7 +58,6 @@ class OptimizationParams(ParamGroup):
 
         self.intelligent_confidence_mode = 'percentile'
         self.intelligent_confidence_percentile = 40.0
-        # self.intelligent_confidence_threshold = 0.07
 
         self.roi_management_interval = 100
         self.roi_prune_threshold = -3.0
@@ -67,12 +66,12 @@ class OptimizationParams(ParamGroup):
         self.roi_background_reward = -0.05
         self.roi_standard_reward = 0.05
         self.roi_core_bonus_reward = 0.05
+        self.auto_mask_pre_threshold_ratio = 0.5
 
         self.use_confidence_modulation = True
         self.confidence_prune_center = -2.0
         self.confidence_prune_steepness = 2.0
 
-        # 添加新的调制致密化参数
         self.confidence_densify_sensitivity = 2.5
 
         self.confidence_densify_scale = 2.0

@@ -8,6 +8,7 @@ from argparse import ArgumentParser
 import numpy as np
 import yaml
 import matplotlib.pyplot as plt
+import datetime
 
 sys.path.append("./")
 from r2_gaussian.arguments import ModelParams, OptimizationParams, PipelineParams
@@ -367,16 +368,13 @@ if __name__ == "__main__":
     parser.add_argument("--roi_update_start_iter", type=int, default=5000,
                         help="Iteration to start ROI confidence updates.")
     parser.add_argument('--auto_mask', action='store_true', help="如果设置此项，将自动检查并生成ROI掩码。")
+    parser.add_argument("--auto_mask_no_previews", action="store_true",
+                        help="禁用保存自动掩码的PNG预览图和HU直方图。")
     parser.add_argument('--no_previews', dest='save_previews', action='store_false',
                         help="设置此项后，将不生成PNG格式的掩码预览图，只生成NPY文件。")
-    parser.set_defaults(save_previews=True)
     parser.add_argument("--noisy_view_indices", type=int, nargs='+', default=None,
                         help="一个或多个训练视图的索引，只有这些视图会被添加噪声。如果未提供，则噪声会应用于所有视图。")
-
-    parser.add_argument('--mask_bone_wl', type=int, default=380, help="核心骨架掩码的窗位 (Window Level)。")
-    parser.add_argument('--mask_bone_ww', type=int, default=380, help="核心骨架掩码的窗宽 (Window Width)。")
-    parser.add_argument('--mask_tissue_wl', type=int, default=40, help="软组织掩码的窗位 (Window Level)。")
-    parser.add_argument('--mask_tissue_ww', type=int, default=400, help="软组织掩码的窗宽 (Window Width)。")
+    parser.set_defaults(save_previews=True)
 
     op_group = parser.add_argument_group("Optimization", "Optimization parameters")
 
@@ -394,6 +392,30 @@ if __name__ == "__main__":
         print(f"Loading configuration file from {args.config}")
         cfg = load_config(args.config)
         for key in list(cfg.keys()): args_dict[key] = cfg[key]
+
+    print("\n--- [路径配置] ---")
+    # 检查用户是否通过 -m 或 --model_path 明确指定了路径。
+    # 我们通过比较当前值和解析器的默认值来判断。
+    model_path_was_specified = args.model_path != parser.get_default('model_path')
+
+    if model_path_was_specified:
+        # 如果用户明确指定了路径（例如，我们的实验脚本所做的），则直接使用它。
+        print(f"   - 已明确指定输出路径: '{args.model_path}'")
+        # 不需要做任何事，args.model_path 已经是正确的值
+    else:
+        # 如果用户没有指定路径，我们自动生成一个。
+        print("   - 未指定输出路径，将自动生成...")
+        if hasattr(args, 'source_path') and args.source_path:
+            scene_name = osp.basename(osp.normpath(args.source_path))
+            current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            # 格式: ./output/{场景名}/{时间戳}
+            new_model_path = osp.join("./output", scene_name, current_time)
+            args.model_path = new_model_path
+            print(f"   - 自动生成路径为: '{args.model_path}'")
+        else:
+            # 极端情况：既没有指定 -m 也没有指定 -s
+            print("   - 警告: 未提供 source_path (-s)，无法生成场景特定路径。将使用默认路径。")
+            # log_utils.py 仍然可以处理这种情况，但会使用一个通用的 'scene' 文件夹
 
     if args.auto_mask:
         print("\n--- [自动化ROI掩码处理模块] ---")
@@ -421,11 +443,8 @@ if __name__ == "__main__":
                 # 调用我们新的、基于窗宽窗位的生成函数
                 generated_soft_dir, generated_core_dir = check_and_generate_masks(
                     source_path=args.source_path,
-                    bone_wl=args.mask_bone_wl,
-                    bone_ww=args.mask_bone_ww,
-                    tissue_wl=args.mask_tissue_wl,
-                    tissue_ww=args.mask_tissue_ww,
-                    save_png_previews=args.save_previews
+                    pre_threshold_ratio=args.auto_mask_pre_threshold_ratio,
+                    save_previews=not args.auto_mask_no_previews
                 )
 
                 args.soft_mask_dir = generated_soft_dir
@@ -440,10 +459,9 @@ if __name__ == "__main__":
                 print("   - 训练已终止。")
                 sys.exit(1)
 
-        # 4. 最终确认使用的目录
-        print("   - 配置已确认，将使用以下NPY掩码目录:")
-        print(f"     - 软组织 (Soft): {args.soft_mask_dir}")
-        print(f"     - 核心骨架 (Core): {args.core_mask_dir}")
+            print("   - 配置已确认，将使用以下NPY掩码目录:")
+            print(f"     - 软组织 (Soft): {args.soft_mask_dir}")
+            print(f"     - 核心骨架 (Core): {args.core_mask_dir}")
 
     tb_writer = prepare_output_and_logger(args)
     print("Optimizing " + args.model_path)

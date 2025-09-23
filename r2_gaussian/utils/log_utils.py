@@ -1,7 +1,6 @@
-# r2_gaussian/utils/log_utils.py
+# r2_gaussian/utils/log_utils.py (修正后)
 import os
 import sys
-import uuid
 import os.path as osp
 from argparse import Namespace
 import yaml
@@ -9,7 +8,6 @@ import datetime
 
 try:
     from tensorboardX import SummaryWriter
-
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
@@ -17,14 +15,12 @@ except ImportError:
 sys.path.append("./")
 from r2_gaussian.utils.cfg_utils import args2string
 
-scene = 'teapot'
 
 def prepare_output_and_logger(args):
-    # Update model path if not specified
-    if not args.model_path:
-        # 使用当前时间作为文件夹名
-        current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        args.model_path = osp.join(f"./output/{scene}", current_time)
+    # --- [修改开始] ---
+    # 移除了所有 if not args.model_path: 的逻辑。
+    # 我们现在假设 args.model_path 在调用此函数时已经是最终确定的路径。
+    # --- [修改结束] ---
 
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
