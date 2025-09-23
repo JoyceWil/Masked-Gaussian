@@ -234,27 +234,35 @@ class GaussianModel:
             self._roi_confidence[in_image_indices_absolute] += delta_confidence.unsqueeze(1)
             self._roi_confidence.clamp_(-5, 5)
 
+    # 请将此函数替换掉您代码中所有的 densify_and_prune 函数
+
     def densify_and_prune(self, opt: OptimizationParams, max_scale, densify_scale_threshold, scene_scale):
         """
-        【V21.0 - 解耦控制最终版】
-        - 核心思想: 彻底解耦致密化和剪枝的控制。
-        - 致密化: 回归Baseline的纯梯度驱动模式，实现最高效的点数增长，从根源上解决点数冗余。
-        - 剪枝: 保留我们先进的、基于置信度的概率性剪枝，智能地优化点云结构。
-        - 目标: 实现点数与Baseline持平，而性能（PSNR）超越Baseline。
+        【V23.0 - 三位一体控制系统】
+        - 核心思想: 基于您的深刻洞见，将梯度、透明度和置信度进行深度耦合，实现确定性的、动态的演化控制。
+        - 致密化: 置信度越高的点，其致密化梯度阈值越低，实现对重要区域的主动、精细优化。
+        - 剪枝: 置信度越高的点，其透明度剪枝阈值越低（容忍度越高），保护重要区域的“潜力股”，同时严苛对待背景点。
+        - 优点: 完全确定性，无随机性；逻辑优雅，符合直觉；最大化了置信度这一核心创新的价值。
         """
 
-        # --- 1. 致密化阶段 (Densification) ---
+        # --- 准备阶段: 获取三大核心因素 ---
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+        opacities = self.get_density.squeeze()
+        confidences = self.get_roi_confidence.squeeze()
 
+        # --- 1. 致密化阶段 (Densification) ---
         if opt.max_num_gaussians and self.get_xyz.shape[0] > opt.max_num_gaussians:
             prune_filter_split = torch.zeros(self.get_xyz.shape[0], device="cuda", dtype=torch.bool)
         else:
-            grads = self.xyz_gradient_accum / self.denom
-            grads[grads.isnan()] = 0.0
+            # 【新致密化逻辑】动态梯度阈值
+            # 使用sigmoid将(-inf, +inf)的置信度映射到(0, 1)的重要性因子
+            importance_factor = torch.sigmoid(confidences / opt.confidence_densify_sensitivity)  # sensitivity控制敏感度
 
-            # 【关键修改】致密化决策回归纯梯度驱动，彻底移除置信度的影响！
-            effective_grads_norm = torch.norm(grads, dim=1)
+            # 动态阈值：重要性越高，阈值越低。我们用乘法实现：将梯度放大来比较
+            # 重要性为1时，梯度放大2倍；重要性为0.5时，梯度放大1倍；重要性为0时，梯度放大0倍。
+            effective_grads_norm = torch.norm(grads, dim=1) * (importance_factor * 2)
 
-            # 后续逻辑完全不变
             densify_mask = (effective_grads_norm > opt.densify_grad_threshold)
 
             if densify_scale_threshold is not None:
@@ -265,61 +273,62 @@ class GaussianModel:
                     torch.max(self.get_scaling, dim=1).values >= opt.densify_scale_threshold * scene_scale)
             clone_mask = densify_mask & ~split_mask
 
-            # --- 读取阶段: 收集新点信息 ---
-            # 注意：虽然致密化不再由置信度驱动，但新生点依然需要继承置信度，以便接受剪枝的考验
+            # --- 数据收集与写入 (与之前版本类似，但逻辑更清晰) ---
             all_new_xyz, all_new_density, all_new_scaling, all_new_rotation = [], [], [], []
             all_new_roi_confidence, all_new_max_radii2D = [], []
 
-            # Part A: 克隆点
+            # 克隆点
             if torch.sum(clone_mask) > 0:
-                # 置信度继承规则不变
                 new_confidence_clone = self._roi_confidence[clone_mask] * opt.clone_confidence_decay_factor
-                all_new_xyz.append(self._xyz[clone_mask])
-                all_new_density.append(self._density[clone_mask])
-                all_new_scaling.append(self._scaling[clone_mask])
-                all_new_rotation.append(self._rotation[clone_mask])
-                all_new_roi_confidence.append(new_confidence_clone)
+                # ... (此处省略append代码，与您之前的版本相同)
+                all_new_xyz.append(self._xyz[clone_mask]);
+                all_new_density.append(self._density[clone_mask]);
+                all_new_scaling.append(self._scaling[clone_mask]);
+                all_new_rotation.append(self._rotation[clone_mask]);
+                all_new_roi_confidence.append(new_confidence_clone);
                 all_new_max_radii2D.append(self.max_radii2D[clone_mask])
 
-            # Part B: 分裂点
+            # 分裂点
             if torch.sum(split_mask) > 0:
-                # 置信度继承规则不变
                 new_confidence_split = (self._roi_confidence[split_mask] * opt.clone_confidence_decay_factor).repeat(2,
                                                                                                                      1)
-                stds = self.get_scaling[split_mask].repeat(2, 1)
+                # ... (此处省略append代码，与您之前的版本相同)
+                stds = self.get_scaling[split_mask].repeat(2, 1);
                 stds[:, :2] *= 0.8
-                all_new_xyz.append(self._xyz[split_mask].repeat(2, 1))
-                all_new_density.append(self._density[split_mask].repeat(2, 1))
-                all_new_scaling.append(self.scaling_inverse_activation(stds))
-                all_new_rotation.append(self._rotation[split_mask].repeat(2, 1))
-                all_new_roi_confidence.append(new_confidence_split)
+                all_new_xyz.append(self._xyz[split_mask].repeat(2, 1));
+                all_new_density.append(self._density[split_mask].repeat(2, 1));
+                all_new_scaling.append(self.scaling_inverse_activation(stds));
+                all_new_rotation.append(self._rotation[split_mask].repeat(2, 1));
+                all_new_roi_confidence.append(new_confidence_split);
                 all_new_max_radii2D.append(torch.zeros(stds.shape[0], device="cuda"))
 
-            # --- 写入阶段: 一次性批量添加所有新点 ---
+            # 统一写入
             if len(all_new_xyz) > 0:
                 num_added = sum(p.shape[0] for p in all_new_xyz)
-                self.densification_postfix(
-                    new_xyz=torch.cat(all_new_xyz, dim=0),
-                    new_densities=torch.cat(all_new_density, dim=0),
-                    new_scaling=torch.cat(all_new_scaling, dim=0),
-                    new_rotation=torch.cat(all_new_rotation, dim=0),
-                    new_roi_confidence=torch.cat(all_new_roi_confidence, dim=0),
-                    new_max_radii2D=torch.cat(all_new_max_radii2D, dim=0)
-                )
-                prune_filter_split = torch.cat((
-                    split_mask,
-                    torch.zeros(num_added, device="cuda", dtype=torch.bool)
-                ))
+                self.densification_postfix(torch.cat(all_new_xyz, dim=0), torch.cat(all_new_density, dim=0),
+                                           torch.cat(all_new_scaling, dim=0), torch.cat(all_new_rotation, dim=0),
+                                           torch.cat(all_new_roi_confidence, dim=0),
+                                           torch.cat(all_new_max_radii2D, dim=0))
+                prune_filter_split = torch.cat((split_mask, torch.zeros(num_added, device="cuda", dtype=torch.bool)))
             else:
-                num_added = 0
                 prune_filter_split = torch.zeros(self.get_xyz.shape[0], device="cuda", dtype=torch.bool)
 
         # --- 2. 剪枝阶段 (Pruning) ---
-        opacities = self.get_density
+
+        # 【新剪枝逻辑】动态透明度阈值 (动态容忍度)
+        # 再次使用 sigmoid 映射的重要性因子
+        importance_factor = torch.sigmoid(confidences)  # 这里可以直接用，或用不同的sensitivity
+
+        # 动态阈值: 重要性越高，容忍度越高（阈值越低）。
+        # 重要性为1 (核心ROI) -> 阈值 = 基础阈值 * (1-1) = 0 (极度容忍)
+        # 重要性为0 (背景) -> 阈值 = 基础阈值 * (1-0) = 基础阈值 (标准严苛)
+        # 重要性为0.5 (软组织) -> 阈值 = 基础阈值 * 0.5 (中等容忍)
+        dynamic_opacity_threshold = opt.opacity_prune_threshold * (1.0 - importance_factor)
+
+        opacity_prune_mask = (opacities < dynamic_opacity_threshold)
+
+        # 其他剪枝规则保持不变
         scales = self.get_scaling
-
-        opacity_prune_mask = (opacities < opt.opacity_prune_threshold).squeeze()
-
         scale_prune_mask = torch.zeros_like(opacity_prune_mask)
         if max_scale:
             scale_prune_mask = (torch.max(scales, dim=1).values > max_scale * scene_scale)
@@ -328,17 +337,8 @@ class GaussianModel:
         if opt.max_screen_size:
             screen_size_prune_mask = (self.max_radii2D > opt.max_screen_size)
 
-        base_prune_mask = opacity_prune_mask | scale_prune_mask | screen_size_prune_mask
-
-        if opt.use_confidence_modulation:
-            confidences = self.get_roi_confidence.squeeze(-1)
-            pruning_prob = torch.sigmoid(-opt.confidence_prune_steepness * (confidences - opt.confidence_prune_center))
-            random_values = torch.rand_like(pruning_prob)
-            probabilistic_prune_mask = (random_values < pruning_prob)
-            final_prune_mask = base_prune_mask | probabilistic_prune_mask
-        else:
-            final_prune_mask = base_prune_mask
-
+        # 合并所有剪枝条件
+        final_prune_mask = opacity_prune_mask | scale_prune_mask | screen_size_prune_mask
         total_prune_mask = prune_filter_split | final_prune_mask
 
         if torch.sum(total_prune_mask) > 0:
