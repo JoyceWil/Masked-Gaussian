@@ -60,13 +60,14 @@ class OptimizationParams(ParamGroup):
         self.intelligent_confidence_percentile = 40.0
 
         self.roi_management_interval = 100
-        self.roi_prune_threshold = -3.0
+        self.roi_prune_threshold = -1.0
         self.roi_protect_threshold = 0.8
         self.roi_candidate_threshold = 0.2
         self.roi_background_reward = -0.05
-        self.roi_standard_reward = 0.05
-        self.roi_core_bonus_reward = 0.05
+        self.roi_standard_reward = 0.1
+        self.roi_core_bonus_reward = 0.1
         self.auto_mask_pre_threshold_ratio = 0.5
+        self.clone_confidence_decay_factor = 0.5
 
         self.use_confidence_modulation = True
         self.confidence_prune_center = -2.0
