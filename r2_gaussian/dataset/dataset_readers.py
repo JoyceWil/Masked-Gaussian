@@ -1,4 +1,5 @@
-# r2_gaussian/dataset/dataset_readers.py (包含可视化调试的最终版)
+# r2_gaussian/dataset/dataset_readers.py (已移除所有噪声相关代码)
+
 import os
 import sys
 from typing import NamedTuple
@@ -7,7 +8,8 @@ import os.path as osp
 import json
 import torch
 import pickle
-import matplotlib.pyplot as plt
+
+# matplotlib 已被移除，因为它仅用于噪声可视化
 
 sys.path.append("./")
 from r2_gaussian.utils.graphics_utils import BasicPointCloud, fetchPly
@@ -17,16 +19,8 @@ mode_id = {
     "cone": 1,
 }
 
-def add_noise(image, noise_level):
-    if noise_level == 0:
-        return image
-    signal_max = image.max()
-    if signal_max == 0:
-        return image
-    noise_std = signal_max * noise_level
-    noise = np.random.normal(0, noise_std, image.shape).astype(np.float32)
-    noisy_image = image + noise
-    return np.maximum(0, noisy_image)
+
+# 函数 add_noise 已被移除
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -43,6 +37,7 @@ class CameraInfo(NamedTuple):
     mode: int
     scanner_cfg: dict
 
+
 class SceneInfo(NamedTuple):
     train_cameras: list
     test_cameras: list
@@ -50,19 +45,26 @@ class SceneInfo(NamedTuple):
     scanner_cfg: dict
     scene_scale: float
 
-def readBlenderInfo(path, eval, noise_level=0.0, noisy_view_indices=None):
+
+def readBlenderInfo(path, eval):
+    # noise_level 和 noisy_view_indices 参数已移除
     meta_data_path = osp.join(path, "meta_data.json")
     with open(meta_data_path, "r") as handle:
         meta_data = json.load(handle)
     meta_data["vol"] = osp.join(path, meta_data["vol"])
     if not "dVoxel" in meta_data["scanner"]:
-        meta_data["scanner"]["dVoxel"] = list(np.array(meta_data["scanner"]["sVoxel"]) / np.array(meta_data["scanner"]["nVoxel"]))
+        meta_data["scanner"]["dVoxel"] = list(
+            np.array(meta_data["scanner"]["sVoxel"]) / np.array(meta_data["scanner"]["nVoxel"]))
     if not "dDetector" in meta_data["scanner"]:
-        meta_data["scanner"]["dDetector"] = list(np.array(meta_data["scanner"]["sDetector"]) / np.array(meta_data["scanner"]["nDetector"]))
+        meta_data["scanner"]["dDetector"] = list(
+            np.array(meta_data["scanner"]["sDetector"]) / np.array(meta_data["scanner"]["nDetector"]))
     scene_scale = 2 / max(meta_data["scanner"]["sVoxel"])
     for key_to_scale in ["dVoxel", "sVoxel", "sDetector", "dDetector", "offOrigin", "offDetector", "DSD", "DSO"]:
         meta_data["scanner"][key_to_scale] = (np.array(meta_data["scanner"][key_to_scale]) * scene_scale).tolist()
-    cam_infos = readCTameras(meta_data, path, eval, scene_scale, noise_level, noisy_view_indices)
+
+    # 调用 readCTameras 时不再传递噪声相关参数
+    cam_infos = readCTameras(meta_data, path, eval, scene_scale)
+
     train_cam_infos = cam_infos["train"]
     test_cam_infos = cam_infos["test"]
     vol_gt = torch.from_numpy(np.load(meta_data["vol"])).float().cuda()
@@ -72,16 +74,22 @@ def readBlenderInfo(path, eval, noise_level=0.0, noisy_view_indices=None):
     )
     return scene_info
 
-def readCTameras(meta_data, source_path, eval=False, scene_scale=1.0, noise_level=0.0, noisy_view_indices=None):
+
+def readCTameras(meta_data, source_path, eval=False, scene_scale=1.0):
+    # noise_level 和 noisy_view_indices 参数已移除
     cam_cfg = meta_data["scanner"]
-    if eval: splits = ["train", "test"]
-    else: splits = ["train"]
+    if eval:
+        splits = ["train", "test"]
+    else:
+        splits = ["train"]
     cam_infos = {"train": [], "test": []}
     for split in splits:
         split_info = meta_data["proj_" + split]
         n_split = len(split_info)
-        if split == "test": uid_offset = len(meta_data["proj_train"])
-        else: uid_offset = 0
+        if split == "test":
+            uid_offset = len(meta_data["proj_train"])
+        else:
+            uid_offset = 0
         for i_split in range(n_split):
             sys.stdout.write("\r")
             sys.stdout.write(f"Reading camera {i_split + 1}/{n_split} for {split}")
@@ -95,41 +103,18 @@ def readCTameras(meta_data, source_path, eval=False, scene_scale=1.0, noise_leve
             image_path = osp.join(source_path, frame_info["file_path"])
             image_name_with_ext = osp.basename(image_path)
             image_name = image_name_with_ext.split(".")[0]
+
+            # 直接加载干净的图像，不再有加噪逻辑
             clean_image = np.load(image_path) * scene_scale
-            image_to_use = clean_image
 
-            should_add_noise = False
-            if split == 'train' and noise_level is not None and noise_level > 0:
-                # 场景1: 未指定索引，对所有视图加噪 (原始行为)
-                if noisy_view_indices is None:
-                    should_add_noise = True
-                # 场景2: 已指定索引，仅当当前索引匹配时加噪
-                elif i_split in noisy_view_indices:
-                    should_add_noise = True
+            # [噪声处理、可视化及相关参数已根据您的要求移除]
 
-            if should_add_noise:
-                noisy_image = add_noise(clean_image, noise_level)
-                image_to_use = noisy_image
-
-                # 可视化调试逻辑 (只对第一个加噪的图像进行可视化)
-                # 我们用一个标志来确保只打印一次
-                if not hasattr(readCTameras, 'viz_saved'):
-                    viz_dir = "debug_noise_viz"
-                    os.makedirs(viz_dir, exist_ok=True)
-                    clean_path = osp.join(viz_dir, f"{image_name}_clean.png")
-                    plt.imsave(clean_path, clean_image, cmap='gray')
-                    noisy_path = osp.join(viz_dir, f"{image_name}_noisy.png")
-                    plt.imsave(noisy_path, noisy_image, cmap='gray')
-                    print(f"\n[DEBUG] 噪声可视化已保存 (视图索引: {i_split})！请检查以下文件：")
-                    print(f"        - 干净图像: {clean_path}")
-                    print(f"        - 加噪图像: {noisy_path}\n")
-                    readCTameras.viz_saved = True  # 设置标志
             FovX = np.arctan2(cam_cfg["sDetector"][1] / 2, cam_cfg["DSD"]) * 2
             FovY = np.arctan2(cam_cfg["sDetector"][0] / 2, cam_cfg["DSD"]) * 2
             mode = mode_id[cam_cfg["mode"]]
             cam_info = CameraInfo(
                 uid=i_split + uid_offset, R=R, T=T, angle=frame_angle, FovY=FovY, FovX=FovX,
-                image=image_to_use,
+                image=clean_image,  # 直接使用干净的图像
                 image_path=image_path, image_name=image_name,
                 width=cam_cfg["nDetector"][1], height=cam_cfg["nDetector"][0],
                 mode=mode, scanner_cfg=cam_cfg,
@@ -137,6 +122,7 @@ def readCTameras(meta_data, source_path, eval=False, scene_scale=1.0, noise_leve
             cam_infos[split].append(cam_info)
         sys.stdout.write("\n")
     return cam_infos
+
 
 def angle2pose(DSO, angle):
     phi1 = -np.pi / 2
@@ -151,7 +137,9 @@ def angle2pose(DSO, angle):
     transform[:3, 3] = trans
     return transform
 
-def readNAFInfo(path, eval, noise_level=0.0, noisy_view_indices=None):
+
+def readNAFInfo(path, eval):
+    # noise_level 和 noisy_view_indices 参数已移除
     with open(path, "rb") as f:
         data = pickle.load(f)
     scanner_cfg = {
@@ -168,8 +156,10 @@ def readNAFInfo(path, eval, noise_level=0.0, noisy_view_indices=None):
     scene_scale = 2 / max(scanner_cfg["sVoxel"])
     for key_to_scale in ["dVoxel", "sVoxel", "sDetector", "dDetector", "offOrigin", "offDetector", "DSD", "DSO"]:
         scanner_cfg[key_to_scale] = (np.array(scanner_cfg[key_to_scale]) * scene_scale).tolist()
-    if eval: splits = ["train", "test"]
-    else: splits = ["train"]
+    if eval:
+        splits = ["train", "test"]
+    else:
+        splits = ["train"]
     cam_infos = {"train": [], "test": []}
     for split in splits:
         if split == "test":
@@ -178,8 +168,10 @@ def readNAFInfo(path, eval, noise_level=0.0, noisy_view_indices=None):
         else:
             uid_offset = 0
             n_split = data["numTrain"]
-        if split == "test" and "val" in data: data_split = data["val"]
-        else: data_split = data[split]
+        if split == "test" and "val" in data:
+            data_split = data["val"]
+        else:
+            data_split = data[split]
         angles = data_split["angles"]
         projs = data_split["projections"]
         for i_split in range(n_split):
@@ -191,43 +183,19 @@ def readNAFInfo(path, eval, noise_level=0.0, noisy_view_indices=None):
             w2c = np.linalg.inv(c2w)
             R = np.transpose(w2c[:3, :3])
             T = w2c[:3, 3]
+
+            # 直接加载干净的图像，不再有加噪逻辑
             clean_image = projs[i_split] * scene_scale
-            image_to_use = clean_image
-            if split == 'train' and noise_level is not None and noise_level > 0:
-                noisy_image = add_noise(clean_image, noise_level)
-                image_to_use = clean_image
 
-                # <<< 核心修改：更新加噪逻辑 >>>
-                should_add_noise = False
-                if split == 'train' and noise_level is not None and noise_level > 0:
-                    # 场景1: 未指定索引，对所有视图加噪 (原始行为)
-                    if noisy_view_indices is None:
-                        should_add_noise = True
-                    # 场景2: 已指定索引，仅当当前索引匹配时加噪
-                    elif i_split in noisy_view_indices:
-                        should_add_noise = True
+            # [噪声处理、可视化及相关参数已根据您的要求移除]
 
-                if should_add_noise:
-                    noisy_image = add_noise(clean_image, noise_level)
-                    image_to_use = noisy_image
-
-                    # 可视化调试逻辑 (只对第一个加噪的图像进行可视化)
-                    if not hasattr(readNAFInfo, 'viz_saved'):
-                        viz_dir = "debug_noise_viz"
-                        os.makedirs(viz_dir, exist_ok=True)
-                        clean_path = osp.join(viz_dir, f"naf_{i_split + uid_offset:04d}_clean.png")
-                        plt.imsave(clean_path, clean_image, cmap='gray')
-                        noisy_path = osp.join(viz_dir, f"naf_{i_split + uid_offset:04d}_noisy.png")
-                        plt.imsave(noisy_path, noisy_image, cmap='gray')
-                        print(
-                            f"\n[DEBUG] NAF噪声可视化已保存 (视图索引: {i_split})！请检查: {clean_path} 和 {noisy_path}\n")
-                        readNAFInfo.viz_saved = True  # 设置标志
             FovX = np.arctan2(scanner_cfg["sDetector"][1] / 2, scanner_cfg["DSD"]) * 2
             FovY = np.arctan2(scanner_cfg["sDetector"][0] / 2, scanner_cfg["DSD"]) * 2
             mode = mode_id[scanner_cfg["mode"]]
             cam_info = CameraInfo(
                 uid=i_split + uid_offset, R=R, T=T, angle=frame_angle, FovY=FovY, FovX=FovX,
-                image=image_to_use, image_path=None, image_name=f"{i_split + uid_offset:04d}",
+                image=clean_image,  # 直接使用干净的图像
+                image_path=None, image_name=f"{i_split + uid_offset:04d}",
                 width=scanner_cfg["nDetector"][1], height=scanner_cfg["nDetector"][0],
                 mode=mode, scanner_cfg=scanner_cfg,
             )
@@ -241,6 +209,7 @@ def readNAFInfo(path, eval, noise_level=0.0, noisy_view_indices=None):
         scanner_cfg=scanner_cfg, vol=vol_gt, scene_scale=scene_scale,
     )
     return scene_info
+
 
 sceneLoadTypeCallbacks = {
     "Blender": readBlenderInfo,

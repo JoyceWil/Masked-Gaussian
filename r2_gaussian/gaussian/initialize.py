@@ -1,4 +1,3 @@
-# r2_gaussian/gaussian/initialize.py
 import os
 import sys
 import os.path as osp
@@ -30,7 +29,6 @@ def initialize_gaussian(gaussians: GaussianModel, args: ModelParams, loaded_iter
         if args.ply_path == "":
             if osp.exists(osp.join(args.source_path, "meta_data.json")):
                 ply_path = osp.join(
-                    # args.source_path, "init_rads_" + osp.basename(args.source_path) + ".npy"
                     args.source_path, "init_" + osp.basename(args.source_path) + ".npy"
                 )
             elif args.source_path.split(".")[-1] in ["pickle", "pkl"]:

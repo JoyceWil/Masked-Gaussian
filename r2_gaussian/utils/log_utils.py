@@ -1,13 +1,13 @@
-# r2_gaussian/utils/log_utils.py (修正后)
 import os
 import sys
+import uuid
 import os.path as osp
 from argparse import Namespace
 import yaml
-import datetime
 
 try:
     from tensorboardX import SummaryWriter
+
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
@@ -17,10 +17,13 @@ from r2_gaussian.utils.cfg_utils import args2string
 
 
 def prepare_output_and_logger(args):
-    # --- [修改开始] ---
-    # 移除了所有 if not args.model_path: 的逻辑。
-    # 我们现在假设 args.model_path 在调用此函数时已经是最终确定的路径。
-    # --- [修改结束] ---
+    # Update model path if not specified
+    if not args.model_path:
+        if os.getenv("OAR_JOB_ID"):
+            unique_str = os.getenv("OAR_JOB_ID")
+        else:
+            unique_str = str(uuid.uuid4())
+        args.model_path = osp.join("./output/", unique_str[0:10])
 
     # Set up output folder
     print("Output folder: {}".format(args.model_path))

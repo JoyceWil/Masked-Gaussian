@@ -1,6 +1,5 @@
 name: r2_gaussian
 channels:
-  - nvidia
   - pytorch
   - conda-forge
   - defaults
@@ -26,6 +25,5 @@ dependencies:
     - pyvista
     - Cython==0.29.36
     - open3d==0.18.0
-    - lpips
-#    - -e r2_gaussian/submodules/simple-knn
-#    - -e r2_gaussian/submodules/xray-gaussian-rasterization-voxelization
+    - -e r2_gaussian/submodules/simple-knn
+    - -e r2_gaussian/submodules/xray-gaussian-rasterization-voxelization

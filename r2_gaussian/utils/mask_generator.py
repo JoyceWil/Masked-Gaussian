@@ -1,4 +1,4 @@
-# r2_gaussian/utils/mask_generator.py (最终零参数自动化版)
+# r2_gaussian/utils/mask_generator.py
 import os
 import os.path as osp
 import sys
@@ -8,11 +8,6 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from scipy.signal import find_peaks
 from skimage.measure import shannon_entropy
-
-
-# ==============================================================================
-# 核心工具函数 (无变化)
-# ==============================================================================
 
 def convert_mu_to_hu(mu_image: np.ndarray) -> np.ndarray:
     """将原始的mu值（衰减系数）图像通过线性映射转换为HU（亨氏单位）图像。"""
@@ -40,11 +35,6 @@ def apply_windowing(hu_image: np.ndarray, window_level: int, window_width: int) 
         return np.zeros_like(soft_mask)
     soft_mask = (soft_mask - min_hu) / window_width
     return soft_mask
-
-
-# ==============================================================================
-# 自动化优化函数 (现在直接使用所有HU图像)
-# ==============================================================================
 
 def _find_optimal_window(
         all_hu_images: list,
@@ -114,11 +104,6 @@ def _find_optimal_window(
 
     print(f"   - [Auto] '{target_class}' 优化完成! 最优WL: {optimal_wl}, 最优WW: {optimal_ww}")
     return {'wl': optimal_wl, 'ww': optimal_ww}
-
-
-# ==============================================================================
-# train.py 将要调用的主函数 (最终零参数自动化版)
-# ==============================================================================
 
 def check_and_generate_masks(
         source_path: str,
@@ -226,6 +211,16 @@ def check_and_generate_masks(
                        vmax=1)
 
     print(f"   - 所有 {len(file_list)} 个文件的软掩码已成功生成。")
+
+    try:
+        optimal_windows = {'tissue': optimal_tissue_window, 'bone': optimal_bone_window}
+        windows_json_path = osp.join(base_mask_dir, 'optimal_windows.json')
+        import json
+        with open(windows_json_path, 'w') as f:
+            json.dump(optimal_windows, f, indent=4)
+        print(f"   - 最优窗参数已保存至: {windows_json_path}")
+    except Exception as e:
+        print(f"   - 警告: 保存最优窗参数到JSON文件失败: {e}")
 
     # 7. 返回生成的NPY目录路径
     return tissue_mask_npy_dir, bone_mask_npy_dir

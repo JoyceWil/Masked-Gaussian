@@ -1,4 +1,3 @@
-# r2_gaussian/utils/cfg_utils.py
 import yaml
 import json
 import os.path as osp

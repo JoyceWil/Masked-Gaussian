@@ -1,4 +1,5 @@
-# r2_gaussian/dataset/__init__.py (最终修复版)
+# r2_gaussian/dataset/__init__.py (已移除噪声代码并优化)
+
 import os
 import sys
 import random
@@ -28,10 +29,12 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = None
 
-        # --- 【核心修改 1】 (这部分是您之前的修改，保持不变) ---
+        # --- [ROI掩码逻辑] ---
         self.soft_mask_dir = args.soft_mask_dir
         self.core_mask_dir = args.core_mask_dir
 
+        # 恢复了原始的、更安全的存在性检查。
+        # train.py中的补丁会确保这里的路径是正确的，从而使此条件为True。
         self.use_roi_masks = self.soft_mask_dir and self.core_mask_dir and \
                              osp.exists(self.soft_mask_dir) and osp.exists(self.core_mask_dir)
 
@@ -40,19 +43,15 @@ class Scene:
             print(f"  - 软组织掩码目录: {self.soft_mask_dir}")
             print(f"  - 核心骨架掩码目录: {self.core_mask_dir}")
         else:
-            print("警告: 未提供有效的2D掩码目录，ROI管理将不会被激活。")
+            print("未提供有效的2D掩码目录，ROI管理将不会被激活。")
 
-        # --- 【核心修复 1/2：接收 noise_level 参数】 ---
-        # 从传入的 args 对象中安全地获取 noise_level，如果不存在则默认为 0.0
-        self.noise_level = getattr(args, 'noise_level', 0.0)
+        # --- [噪声相关代码已根据您的要求移除] ---
 
         # Read scene info
         if osp.exists(osp.join(args.source_path, "meta_data.json")):
-            # --- 【核心修复 2/2：传递 noise_level 参数】 ---
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.eval, self.noise_level)
+            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.eval)
         elif args.source_path.split(".")[-1] in ["pickle", "pkl"]:
-            # --- 【核心修复 2/2：传递 noise_level 参数】 ---
-            scene_info = sceneLoadTypeCallbacks["NAF"](args.source_path, args.eval, self.noise_level)
+            scene_info = sceneLoadTypeCallbacks["NAF"](args.source_path, args.eval)
         else:
             assert False, f"Could not recognize scene type: {args.source_path}."
 
@@ -65,11 +64,14 @@ class Scene:
         print("Loading Test Cameras")
         self.test_cameras = cameraList_from_camInfos(scene_info.test_cameras, args)
 
-        # --- 【核心修改 2】 (这部分是您之前的修改，保持不变) ---
+        # --- [掩码加载逻辑] ---
         if self.use_roi_masks:
             print("正在为训练相机加载2D掩码...")
             for camera in self.train_cameras:
-                base_name = osp.splitext(osp.basename(camera.image_name))[0] + '.npy'
+                # 兼容 .npy 和 .png/.jpg 等多种可能的图像扩展名
+                base_name_with_ext = osp.basename(camera.image_name)
+                base_name = osp.splitext(base_name_with_ext)[0] + '.npy'
+
                 soft_mask_path = osp.join(self.soft_mask_dir, base_name)
                 core_mask_path = osp.join(self.core_mask_dir, base_name)
 

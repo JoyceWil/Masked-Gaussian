@@ -1,4 +1,3 @@
-# r2_gaussian/utils/ct_utils.py
 import os
 import sys
 import numpy as np

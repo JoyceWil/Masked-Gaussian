@@ -1,199 +1,231 @@
-# r2_gaussian/utils/image_utils.py
 import sys
 import numpy as np
 import torch
-from skimage.metrics import structural_similarity
-from skimage.metrics import peak_signal_noise_ratio
 
+# 保持原始的导入路径
 sys.path.append("./")
-from r2_gaussian.utils.loss_utils import ssim as ssim_torch
+from r2_gaussian.utils.loss_utils import ssim
 
+# --- LPIPS 相关代码 (极简版) ---
 try:
     import lpips
 
     LPIPS_AVAILABLE = True
+    # 全局变量，用于缓存LPIPS模型，避免重复加载
+    _lpips_model_cache = {}  # 使用字典来缓存不同设备上的模型
 except ImportError:
     LPIPS_AVAILABLE = False
-    print("警告: lpips包未安装。LPIPS指标将不会被计算。")
-
-_lpips_alex_model = None
-
-
-def get_lpips_model(net_type='alex', device=None):
-    global _lpips_alex_model
-    if _lpips_alex_model is None and LPIPS_AVAILABLE:
-        if device is None:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"正在设备 {device} 上初始化LPIPS(AlexNet)模型...")
-        _lpips_alex_model = lpips.LPIPS(net=net_type).to(device)
-    return _lpips_alex_model
 
 
 @torch.no_grad()
 def compute_lpips(img1, img2):
+    """
+    计算LPIPS。输入张量应为 [B, C, H, W]，数据范围在 [0, 1]。
+    这个函数会处理模型加载和设备问题。
+    """
     if not LPIPS_AVAILABLE:
-        return torch.tensor([[float('nan')]], device=img1.device)
-    lpips_model = get_lpips_model(device=img1.device)
-    if lpips_model is None:
-        return torch.tensor([[float('nan')]], device=img1.device)
+        if '_lpips_warned' not in globals():
+            print("警告: lpips包未安装。LPIPS指标将不会被计算。")
+            globals()['_lpips_warned'] = True
+        return torch.tensor(float('nan'))
+
+    device = img1.device
+
+    # 从缓存中获取或创建模型
+    if device not in _lpips_model_cache:
+        print(f"正在设备 {device} 上首次初始化LPIPS(AlexNet)模型...")
+        _lpips_model_cache[device] = lpips.LPIPS(net='alex').to(device)
+
+    lpips_model = _lpips_model_cache[device]
+
+    # LPIPS模型期望输入范围在 [-1, 1]
     img1_scaled = img1 * 2 - 1
     img2_scaled = img2 * 2 - 1
+
     return lpips_model(img1_scaled, img2_scaled)
 
 
+# --- LPIPS 相关代码结束 ---
+
+
+# ==============================================================================
+# == 以下所有函数均保留原始Baseline的逻辑，只在需要的地方添加LPIPS分支 ==
+# ==============================================================================
+
 def mse(img1, img2, mask=None):
+    """MSE error (原始Baseline逻辑)"""
     n_channel = img1.shape[1]
     if mask is not None:
         img1 = img1.flatten(1)
         img2 = img2.flatten(1)
+
         mask = mask.flatten(1).repeat(1, n_channel)
         mask = torch.where(mask != 0, True, False)
-        mse = torch.stack(
-            [(((img1[i, mask[i]] - img2[i, mask[i]])) ** 2).mean(0, keepdim=True) for i in range(img1.shape[0])], dim=0)
+
+        mse_val = torch.stack(
+            [
+                (((img1[i, mask[i]] - img2[i, mask[i]])) ** 2).mean(0, keepdim=True)
+                for i in range(img1.shape[0])
+            ],
+            dim=0,
+        )
+
     else:
-        mse = (((img1 - img2)) ** 2).reshape(img1.shape[0], -1).mean(1, keepdim=True)
-    return mse
+        mse_val = (((img1 - img2)) ** 2).reshape(img1.shape[0], -1).mean(1, keepdim=True)
+    return mse_val
 
 
 def rmse(img1, img2, mask=None):
+    """RMSE error (原始Baseline逻辑)"""
     mse_out = mse(img1, img2, mask)
     return mse_out ** 0.5
 
 
 @torch.no_grad()
 def psnr(img1, img2, mask=None, pixel_max=1.0):
+    """PSNR (原始Baseline逻辑)"""
     mse_out = mse(img1, img2, mask)
     psnr_out = 10 * torch.log10(pixel_max ** 2 / mse_out.float())
-    if mask is not None and torch.isinf(psnr_out).any():
-        psnr_out = psnr_out[~torch.isinf(psnr_out)]
+    if mask is not None:
+        if torch.isinf(psnr_out).any():
+            print(mse_out.mean(), psnr_out.mean())
+            psnr_out = 10 * torch.log10(pixel_max ** 2 / mse_out.float())
+            psnr_out = psnr_out[~torch.isinf(psnr_out)]
+
     return psnr_out
 
 
 @torch.no_grad()
-def metric_vol(gt_vol, pred_vol, metric="psnr", pixel_max=1.0):
+def metric_vol(img1, img2, metric="psnr", pixel_max=1.0):
     """
-    【已修复】计算体积指标。
-    - 修复了SSIM在处理包含大片纯色区域（如CT空气）时因除零错误导致'nan'的问题。
-    - 修复了LPIPS计算中因permute维度不匹配导致的RuntimeError。
+    体积指标计算 (保留原始Baseline逻辑, 新增LPIPS分支)
+    img1: GT, img2: Prediction
     """
     assert metric in ["psnr", "ssim", "lpips"]
-    if isinstance(gt_vol, np.ndarray): gt_vol = torch.from_numpy(gt_vol.copy())
-    if isinstance(pred_vol, np.ndarray): pred_vol = torch.from_numpy(pred_vol.copy())
+    if isinstance(img1, np.ndarray):
+        img1 = torch.from_numpy(img1.copy())
+    if isinstance(img2, np.ndarray):
+        img2 = torch.from_numpy(img2.copy())
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    gt_vol, pred_vol = gt_vol.to(device), pred_vol.to(device)
-
-    # 在计算所有指标前，进行一次统一的归一化，确保数据在 [0, 1] 范围
-    gt_min, gt_max = gt_vol.min(), gt_vol.max()
-    if gt_max > gt_min:
-        gt_vol = (gt_vol - gt_min) / (gt_max - gt_min)
-        # 使用gt的范围来归一化pred，保持一致性
-        pred_vol = (pred_vol - gt_min) / (gt_max - gt_min)
-
-    # 将预测值裁剪到 [0, 1] 范围，防止超出
-    pred_vol = torch.clamp(pred_vol, 0, 1)
+    device = img1.device
 
     if metric == "psnr":
-        # 数据已归一化到[0,1]，所以 pixel_max 固定为 1.0
-        mse_val = torch.mean((gt_vol - pred_vol) ** 2)
-        if mse_val == 0: return float('inf'), None
-        psnr_val = 10 * torch.log10(1.0 ** 2 / mse_val.float())
-        return psnr_val.item(), None
+        if pixel_max is None:
+            pixel_max = img1.max()
+        mse_out = torch.mean((img1 - img2) ** 2)
+        psnr_out = 10 * torch.log10(pixel_max ** 2 / mse_out.float())
+        return psnr_out.item(), None
 
     elif metric == "ssim":
-        # <<< 核心修复：使用固定的 data_range=1.0 >>>
         ssims = []
         for axis in [0, 1, 2]:
-            gt_slices = torch.unbind(gt_vol, dim=axis)
-            pred_slices = torch.unbind(pred_vol, dim=axis)
-            axis_ssims = []
-            for s_gt, s_pred in zip(gt_slices, pred_slices):
-                s_gt_np, s_pred_np = s_gt.cpu().numpy(), s_pred.cpu().numpy()
+            results = []
+            count = 0
+            n_slice = img1.shape[axis]
+            for i in range(n_slice):
+                if axis == 0:
+                    slice1, slice2 = img1[i, :, :], img2[i, :, :]
+                elif axis == 1:
+                    slice1, slice2 = img1[:, i, :], img2[:, i, :]
+                else:  # axis == 2
+                    slice1, slice2 = img1[:, :, i], img2[:, :, i]
 
-                # 直接使用 data_range=1.0，不再动态计算。
-                # 这能让 skimage 内部处理好数值稳定性问题。
-                # 我们也不再需要 `if data_range > 0:` 的判断。
-                ssim_value = structural_similarity(s_gt_np, s_pred_np, data_range=1.0)
-                axis_ssims.append(ssim_value)
+                if slice1.max() > 0:
+                    result = ssim(slice1.unsqueeze(0).unsqueeze(0), slice2.unsqueeze(0).unsqueeze(0))
+                    count += 1
+                else:
+                    result = 0
+                results.append(result)
 
-            if axis_ssims: ssims.append(np.mean(axis_ssims))
-
-        # 如果ssims列表为空（例如体积太小），返回0.0
-        return np.mean(ssims) if ssims else 0.0, ssims
+            if count > 0:
+                mean_results = torch.sum(torch.tensor(results)) / count
+                ssims.append(mean_results.item())
+            else:
+                ssims.append(0.0)
+        return float(np.mean(ssims)), ssims
 
     elif metric == "lpips":
-        if not LPIPS_AVAILABLE: return float('nan'), [float('nan')] * 3
-
-        lpips_scores = []
-        # 数据已在函数开头归一化，这里直接使用
+        all_axis_scores = []
         for axis in [0, 1, 2]:
             if axis == 0:
-                gt_slices = gt_vol.unsqueeze(1)
-                pred_slices = pred_vol.unsqueeze(1)
+                slices1, slices2 = img1.unsqueeze(1), img2.unsqueeze(1)
             elif axis == 1:
-                gt_slices = gt_vol.permute(1, 0, 2).unsqueeze(1)
-                pred_slices = pred_vol.permute(1, 0, 2).unsqueeze(1)
-            else:
-                gt_slices = gt_vol.permute(2, 0, 1).unsqueeze(1)
-                pred_slices = pred_vol.permute(2, 0, 1).unsqueeze(1)
+                slices1, slices2 = img1.permute(1, 0, 2).unsqueeze(1), img2.permute(1, 0, 2).unsqueeze(1)
+            else:  # axis == 2
+                slices1, slices2 = img1.permute(2, 0, 1).unsqueeze(1), img2.permute(2, 0, 1).unsqueeze(1)
 
-            gt_slices = gt_slices.repeat(1, 3, 1, 1)
-            pred_slices = pred_slices.repeat(1, 3, 1, 1)
+            slices1_rgb = slices1.repeat(1, 3, 1, 1)
+            slices2_rgb = slices2.repeat(1, 3, 1, 1)
 
             batch_size = 32
-            axis_lpips = []
-            for i in range(0, gt_slices.shape[0], batch_size):
-                batch_gt = gt_slices[i:i + batch_size]
-                batch_pred = pred_slices[i:i + batch_size]
-                axis_lpips.append(compute_lpips(batch_gt, batch_pred))
+            axis_scores = []
+            for i in range(0, slices1_rgb.shape[0], batch_size):
+                batch1 = slices1_rgb[i:i + batch_size].to(device)
+                batch2 = slices2_rgb[i:i + batch_size].to(device)
+                scores = compute_lpips(batch1, batch2)
+                axis_scores.append(scores)
 
-            if axis_lpips:
-                lpips_scores.append(torch.cat(axis_lpips).mean().item())
-            else:
-                lpips_scores.append(float('nan'))
+            if axis_scores:
+                all_axis_scores.append(torch.cat(axis_scores).mean().item())
 
-        return np.nanmean(lpips_scores), lpips_scores
+        return np.nanmean(all_axis_scores) if all_axis_scores else float('nan'), all_axis_scores
 
 
 @torch.no_grad()
-def metric_proj(gt_projs, pred_projs, metric="psnr", pixel_max=1.0):
+def metric_proj(img1, img2, metric="psnr", axis=2, pixel_max=1.0):
+    """
+    投影指标计算 (保留原始Baseline逻辑, 新增LPIPS分支)
+    img1: GT [x, y, z], img2: Prediction [x, y, z]
+    """
+    assert axis == 2, "metric_proj 目前只支持沿着z轴(axis=2)的投影"
     assert metric in ["psnr", "ssim", "lpips"]
-    if isinstance(gt_projs, np.ndarray): gt_projs = torch.from_numpy(gt_projs)
-    if isinstance(pred_projs, np.ndarray): pred_projs = torch.from_numpy(pred_projs)
+    if isinstance(img1, np.ndarray): img1 = torch.from_numpy(img1)
+    if isinstance(img2, np.ndarray): img2 = torch.from_numpy(img2)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    gt_projs, pred_projs = gt_projs.to(device), pred_projs.to(device)
+    device = img1.device
 
-    gt_projs = gt_projs.permute(2, 0, 1).unsqueeze(1)
-    pred_projs = pred_projs.permute(2, 0, 1).unsqueeze(1)
+    if metric == "psnr" or metric == "ssim":
+        n_slice = img1.shape[axis]
+        results = []
+        count = 0
+        for i in range(n_slice):
+            slice1, slice2 = img1[:, :, i], img2[:, :, i]
 
-    results = []
-    if metric == "psnr":
-        pixel_max_val = pixel_max if pixel_max is not None else 1.0
-        mse_vals = torch.mean((gt_projs - pred_projs) ** 2, dim=[1, 2, 3])
-        psnr_vals = 10 * torch.log10(pixel_max_val ** 2 / mse_vals)
-        results = psnr_vals.cpu().numpy()
+            if slice1.max() > 0:
+                slice1 = slice1 / slice1.max()
+                slice2 = slice2 / slice2.max()
+                slice1_4d = slice1.unsqueeze(0).unsqueeze(0)
+                slice2_4d = slice2.unsqueeze(0).unsqueeze(0)
+                if metric == "psnr":
+                    result = psnr(slice1_4d, slice2_4d, pixel_max=pixel_max)
+                else:  # ssim
+                    result = ssim(slice1_4d, slice2_4d)
+                count += 1
+            else:
+                result = 0
+            results.append(result)
 
-    elif metric == "ssim":
-        for i in range(gt_projs.shape[0]):
-            gt_slice, pred_slice = gt_projs[i], pred_projs[i]
-            results.append(ssim_torch(gt_slice.unsqueeze(0), pred_slice.unsqueeze(0)).item())
+        if count > 0:
+            mean_results = torch.sum(torch.tensor(results)) / count
+            return mean_results.item(), [r.item() for r in results]
+        else:
+            return 0.0, []
 
     elif metric == "lpips":
-        if not LPIPS_AVAILABLE: return float('nan'), [float('nan')] * gt_projs.shape[0]
-        gt_projs_rgb = gt_projs.repeat(1, 3, 1, 1)
-        pred_projs_rgb = pred_projs.repeat(1, 3, 1, 1)
+        slices1 = img1.permute(2, 0, 1).unsqueeze(1)
+        slices2 = img2.permute(2, 0, 1).unsqueeze(1)
+
+        slices1_rgb = slices1.repeat(1, 3, 1, 1)
+        slices2_rgb = slices2.repeat(1, 3, 1, 1)
+
         batch_size = 16
-        lpips_scores = []
-        for i in range(0, gt_projs_rgb.shape[0], batch_size):
-            batch_gt = gt_projs_rgb[i:i + batch_size]
-            batch_pred = pred_projs_rgb[i:i + batch_size]
-            lpips_scores.append(compute_lpips(batch_gt, batch_pred))
-        results = torch.cat(lpips_scores).squeeze().cpu().numpy()
+        all_scores = []
+        for i in range(0, slices1_rgb.shape[0], batch_size):
+            batch1 = slices1_rgb[i:i + batch_size].to(device)
+            batch2 = slices2_rgb[i:i + batch_size].to(device)
+            scores = compute_lpips(batch1, batch2)
+            all_scores.append(scores)
 
-    mean_result = np.mean(results) if len(results) > 0 else 0.0
-
-    if isinstance(results, np.ndarray):
-        return mean_result, results.tolist()
-    else:
-        return mean_result, results
+        results_tensor = torch.cat(all_scores)
+        mean_result = results_tensor.mean().item()
+        return mean_result, results_tensor.cpu().tolist()

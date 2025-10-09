@@ -1,4 +1,3 @@
-# r2_gaussian/utils/plot_utils.py
 import numpy as np
 import matplotlib
 from matplotlib.widgets import Slider

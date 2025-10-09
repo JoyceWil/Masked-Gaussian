@@ -1,4 +1,3 @@
-#r2_gaussian/utils/loss_utils.py
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -31,19 +30,6 @@ def l1_loss(network_output, gt):
 def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()
 
-
-def bce_loss(pred_mask, gt_mask):
-    """
-    计算预测的置信度图和真实的二值掩码之间的二元交叉熵损失。
-
-    Args:
-        pred_mask (torch.Tensor): 模型的预测结果，值在 [0, 1] 之间。
-        gt_mask (torch.Tensor): 真实的二值掩码，值为 0 或 1。
-
-    Returns:
-        torch.Tensor: 计算出的损失值。
-    """
-    return F.binary_cross_entropy(pred_mask, gt_mask)
 
 def gaussian(window_size, sigma):
     gauss = torch.Tensor(
@@ -107,31 +93,40 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean(1).mean(1).mean(1)
 
 
-class FrequencyLoss(nn.Module):
+def gradient_difference_loss(pred, target, alpha=1.0):
     """
-    计算频域L1损失。
-    直接惩罚预测图像和真实图像在傅里叶幅度谱上的差异。
-    这对于恢复高频细节（如纹理、边缘）非常有效。
+    【修正版】计算梯度差异损失 (GDL)。
+    此版本经过简化，专门为单通道图像（如CT）设计，避免了复杂且易错的分组卷积。
     """
+    # 检查输入是否为单通道，如果不是则报错，避免后续出现问题
+    if pred.shape[1] != 1 or target.shape[1] != 1:
+        raise ValueError(
+            f"Gradient Difference Loss (GDL) 期望输入为单通道图像, "
+            f"但收到的预测图像通道为 {pred.shape[1]}, "
+            f"目标图像通道为 {target.shape[1]}."
+        )
 
-    def __init__(self):
-        super(FrequencyLoss, self).__init__()
+    # 定义Sobel算子核。对于单通道输入，核的形状应为 [out_channels, in_channels, kH, kW]
+    # 这里 out_channels=1, in_channels=1
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                           dtype=torch.float32, device=pred.device).view(1, 1, 3, 3)
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                           dtype=torch.float32, device=pred.device).view(1, 1, 3, 3)
 
-    def forward(self, pred_img, gt_img):
-        """
-        Args:
-            pred_img (torch.Tensor): 预测图像，形状为 (B, C, H, W)
-            gt_img (torch.Tensor): 真实图像，形状为 (B, C, H, W)
-        """
-        # 1. 对最后两个维度（H, W）进行二维傅里叶变换
-        pred_fft = torch.fft.fft2(pred_img, dim=(-2, -1))
-        gt_fft = torch.fft.fft2(gt_img, dim=(-2, -1))
+    # 直接对单通道图像进行标准2D卷积，无需 'groups' 参数
+    pred_grad_x = F.conv2d(pred, sobel_x, padding=1)
+    pred_grad_y = F.conv2d(pred, sobel_y, padding=1)
+    target_grad_x = F.conv2d(target, sobel_x, padding=1)
+    target_grad_y = F.conv2d(target, sobel_y, padding=1)
 
-        # 2. 计算幅度谱
-        pred_magnitude = torch.abs(pred_fft)
-        gt_magnitude = torch.abs(gt_fft)
+    # 计算梯度差异
+    grad_diff_x = torch.abs(pred_grad_x - target_grad_x)
+    grad_diff_y = torch.abs(pred_grad_y - target_grad_y)
 
-        # 3. 计算幅度谱之间的L1损失
-        loss = F.l1_loss(pred_magnitude, gt_magnitude)
+    # 根据alpha计算最终损失
+    if alpha == 1.0:
+        loss = torch.mean(grad_diff_x + grad_diff_y)
+    else:
+        loss = torch.mean(torch.pow(grad_diff_x, alpha) + torch.pow(grad_diff_y, alpha))
 
-        return loss
+    return loss

@@ -1,4 +1,3 @@
-# r2_gaussian/utils/argument_utils.py
 from argparse import ArgumentParser, Namespace
 import sys
 import os
