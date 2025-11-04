@@ -1,257 +1,350 @@
 import numpy as np
 import argparse
-import os
 import json
+import os
+import sys
 
-# 定义用于mu->HU转换的参考点
-HU_AIR = -1000.0
-HU_HIGH_DENSITY = 1000.0
-
-# --- HTML, CSS, 和 JavaScript 模板 ---
+# 升级后的HTML模板
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive Windowing Tool (v2)</title>
+    <title>窗宽窗位调节器</title>
     <style>
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #282c34;
+            color: #abb2bf;
             display: flex;
             flex-direction: column;
             align-items: center;
-            background-color: #f0f2f5;
             margin: 0;
             padding: 20px;
+            min-height: 100vh;
+            box-sizing: border-box;
         }}
         .container {{
-            background: white;
-            padding: 25px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
             width: 100%;
-            max-width: 800px;
+            max-width: 900px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
         }}
         h1, h2 {{
+            color: #61afef;
             text-align: center;
-            color: #333;
+            word-break: break-all;
         }}
-        .canvas-container {{
-            display: flex;
-            justify-content: center;
-            margin-bottom: 20px;
-            background: #222;
-            padding: 10px;
-            border-radius: 4px;
-        }}
-        canvas {{
-            border: 1px solid #ccc;
-            image-rendering: pixelated; /* 保持像素清晰 */
-            width: 100%;
-            max-width: {width}px;
+        h2 {{
+            font-size: 1rem;
+            font-weight: normal;
+            color: #98c379;
         }}
         .controls {{
-            display: grid;
-            grid-template-columns: 100px 1fr 80px;
-            gap: 10px;
+            background-color: #3a3f4b;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+            width: 100%;
+            max-width: 512px;
+            box-sizing: border-box;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }}
+        .control-group {{
+            display: flex;
             align-items: center;
             margin-bottom: 15px;
         }}
-        label {{
+        .control-group label {{
+            min-width: 150px; /* 增加宽度以容纳更长的标签 */
             font-weight: bold;
-            color: #555;
         }}
         input[type="range"] {{
-            width: 100%;
+            flex-grow: 1;
+            margin: 0 15px;
             cursor: pointer;
         }}
         .value-display {{
-            font-family: "SF Mono", "Courier New", monospace;
-            background-color: #e9ecef;
-            padding: 5px 10px;
+            min-width: 80px;
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #282c34;
+            padding: 5px;
             border-radius: 4px;
             text-align: center;
         }}
-        .info {{
-            border-top: 1px solid #eee;
-            padding-top: 15px;
+        canvas {{
+            background-color: #000;
+            border: 1px solid #444;
+            border-radius: 4px;
             margin-top: 20px;
-            color: #666;
-            font-size: 0.9em;
+            max-width: 100%;
+            height: auto;
+            image-rendering: pixelated;
+            cursor: grab; /* 提示用户可以拖动 */
+        }}
+        canvas:active {{
+            cursor: grabbing; /* 拖动时的光标样式 */
+        }}
+        .stats, .instructions {{
+            background-color: #3a3f4b;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            width: 100%;
+            max-width: 512px;
+            box-sizing: border-box;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.9rem;
+        }}
+        .stats p, .instructions p {{
+            margin: 5px 0;
+        }}
+        .instructions {{
+            background-color: #4b5263;
         }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Interactive Windowing Tool</h1>
-        <div class="canvas-container">
-            <canvas id="projectionCanvas" width="{width}" height="{height}"></canvas>
+        <h1>窗宽窗位调节器</h1>
+        <h2>{file_path}</h2>
+
+        <div class="instructions">
+            <p><strong>操作提示:</strong></p>
+            <p>1. 使用下方滑块进行精确调节。</p>
+            <p>2. <strong>在图像上按住并拖动鼠标:</strong></p>
+            <p>&nbsp;&nbsp;- 左右拖动: 调节 <strong>窗位</strong></p>
+            <p>&nbsp;&nbsp;- 上下拖动: 调节 <strong>窗宽</strong></p>
         </div>
+
+        <canvas id="canvas"></canvas>
 
         <div class="controls">
-            <label for="wlSlider">Window Level:</label>
-            <input type="range" id="wlSlider" min="{min_hu}" max="{max_hu}" value="{default_wl}" step="1">
-            <span id="wlValue" class="value-display">{default_wl}</span>
+            <div class="control-group">
+                <label for="levelSlider">窗位 (Window Level):</label>
+                <input type="range" id="levelSlider" min="{slider_min_level}" max="{slider_max_level}" step="{slider_step}" value="{default_level}">
+                <span id="levelValue" class="value-display">{default_level}</span>
+            </div>
+            <div class="control-group">
+                <label for="widthSlider">窗宽 (Window Width):</label>
+                <input type="range" id="widthSlider" min="{slider_min_width}" max="{slider_max_width}" step="{slider_step}" value="{default_width}">
+                <span id="widthValue" class="value-display">{default_width}</span>
+            </div>
         </div>
 
-        <div class="controls">
-            <label for="wwSlider">Window Width:</label>
-            <input type="range" id="wwSlider" min="1" max="{ww_max_value}" value="{default_ww}" step="1">
-            <span id="wwValue" class="value-display">{default_ww}</span>
-        </div>
-
-        <div class="info">
-            <p><strong>File:</strong> {filename}</p>
-            <p><strong>Dimensions:</strong> {width} x {height}</p>
-            <p><strong>HU Range:</strong> [{min_hu}, {max_hu}]</p>
+        <div class="stats">
+            <p><strong>数据统计:</strong></p>
+            <p>尺寸 (Shape): {data_shape}</p>
+            <p>最小值 (Min): {data_min:.6f}</p>
+            <p>最大值 (Max): {data_max:.6f}</p>
+            <p>平均值 (Mean): {data_mean:.6f}</p>
+            <p>标准差 (Std): {data_std:.6f}</p>
         </div>
     </div>
 
     <script>
-        // --- 数据注入区 ---
-        const huData = {hu_data_json};
-        const canvasWidth = {width};
-        const canvasHeight = {height};
-        // --- 数据注入区结束 ---
+        // --- 数据和常量 ---
+        const rawData = JSON.parse('{json_data}');
+        const imageWidth = {img_width};
+        const imageHeight = {img_height};
 
-        const canvas = document.getElementById('projectionCanvas');
+        // --- DOM 元素 ---
+        const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        const imageData = ctx.createImageData(canvasWidth, canvasHeight);
+        const levelSlider = document.getElementById('levelSlider');
+        const widthSlider = document.getElementById('widthSlider');
+        const levelValueSpan = document.getElementById('levelValue');
+        const widthValueSpan = document.getElementById('widthValue');
 
-        const wlSlider = document.getElementById('wlSlider');
-        const wwSlider = document.getElementById('wwSlider');
-        const wlValueSpan = document.getElementById('wlValue');
-        const wwValueSpan = document.getElementById('wwValue');
+        // --- 初始化 Canvas ---
+        canvas.width = imageWidth;
+        canvas.height = imageHeight;
+        const imageData = ctx.createImageData(imageWidth, imageHeight);
+        const imageDataBuffer = imageData.data;
 
-        function drawImage() {{
-            const wl = parseFloat(wlSlider.value);
-            const ww = parseFloat(wwSlider.value);
+        // --- 核心绘图函数 ---
+        function updateImage() {{
+            const level = parseFloat(levelSlider.value);
+            const width = parseFloat(widthSlider.value);
 
-            const lowerBound = wl - ww / 2;
-            const upperBound = wl + ww / 2;
+            levelValueSpan.textContent = level.toFixed(4);
+            widthValueSpan.textContent = width.toFixed(4);
 
-            for (let i = 0; i < huData.length; i++) {{
-                const huValue = huData[i];
-                let intensity = 0;
+            const windowMin = level - (width / 2);
+            const windowMax = level + (width / 2);
 
-                if (huValue > lowerBound) {{
-                    intensity = (huValue - lowerBound) / ww;
+            for (let i = 0; i < rawData.length; i++) {{
+                const row = rawData[i];
+                for (let j = 0; j < row.length; j++) {{
+                    const pixelValue = row[j];
+                    const dataIndex = (i * imageWidth + j) * 4;
+
+                    let grayValue = 0;
+
+                    if (pixelValue <= windowMin) {{
+                        grayValue = 0;
+                    }} else if (pixelValue >= windowMax) {{
+                        grayValue = 255;
+                    }} else {{
+                        if (width > 0) {{
+                            grayValue = ((pixelValue - windowMin) / width) * 255;
+                        }} else {{
+                            grayValue = 255; // 如果窗宽为0，则显示为白色
+                        }}
+                    }}
+
+                    grayValue = Math.max(0, Math.min(255, grayValue));
+
+                    imageDataBuffer[dataIndex] = grayValue;
+                    imageDataBuffer[dataIndex + 1] = grayValue;
+                    imageDataBuffer[dataIndex + 2] = grayValue;
+                    imageDataBuffer[dataIndex + 3] = 255;
                 }}
-
-                // Clip the value to [0, 1] and scale to [0, 255]
-                intensity = Math.max(0, Math.min(1, intensity));
-                const pixelValue = Math.round(intensity * 255);
-
-                const pixelIndex = i * 4;
-                imageData.data[pixelIndex] = pixelValue;     // R
-                imageData.data[pixelIndex + 1] = pixelValue; // G
-                imageData.data[pixelIndex + 2] = pixelValue; // B
-                imageData.data[pixelIndex + 3] = 255;        // A
             }}
+
             ctx.putImageData(imageData, 0, 0);
         }}
 
-        function updateValuesAndDraw() {{
-            wlValueSpan.textContent = wlSlider.value;
-            wwValueSpan.textContent = wwSlider.value;
-            drawImage();
-        }}
+        // --- 事件监听 ---
+        levelSlider.addEventListener('input', updateImage);
+        widthSlider.addEventListener('input', updateImage);
 
-        wlSlider.addEventListener('input', updateValuesAndDraw);
-        wwSlider.addEventListener('input', updateValuesAndDraw);
+        // --- 新增：鼠标拖拽调节功能 ---
+        let isDragging = false;
+        let startX, startY;
+        let startLevel, startWidth;
 
-        // Initial draw on page load
-        window.onload = updateValuesAndDraw;
+        canvas.addEventListener('mousedown', (e) => {{
+            isDragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            startLevel = parseFloat(levelSlider.value);
+            startWidth = parseFloat(widthSlider.value);
+            // 阻止默认的拖拽行为，例如拖拽图片
+            e.preventDefault();
+        }});
+
+        document.addEventListener('mousemove', (e) => {{
+            if (!isDragging) return;
+
+            const deltaX = e.clientX - startX;
+            const deltaY = e.clientY - startY;
+
+            // 灵敏度调整：可以修改这里的乘数来改变拖拽的灵敏度
+            // 左右拖动改变窗位 (Level)
+            const levelChange = deltaX * (parseFloat(levelSlider.max) - parseFloat(levelSlider.min)) / 800;
+            let newLevel = startLevel + levelChange;
+
+            // 上下拖动改变窗宽 (Width)，注意Y轴方向
+            const widthChange = -deltaY * (parseFloat(widthSlider.max) - parseFloat(widthSlider.min)) / 800;
+            let newWidth = startWidth + widthChange;
+
+            // 限制新值在滑块的范围内
+            newLevel = Math.max(parseFloat(levelSlider.min), Math.min(parseFloat(levelSlider.max), newLevel));
+            newWidth = Math.max(parseFloat(widthSlider.min), Math.min(parseFloat(widthSlider.max), newWidth));
+
+            // 更新滑块的值，这会自动触发 'input' 事件并调用 updateImage
+            levelSlider.value = newLevel;
+            widthSlider.value = newWidth;
+
+            // 手动触发input事件以确保UI同步更新
+            levelSlider.dispatchEvent(new Event('input'));
+            widthSlider.dispatchEvent(new Event('input'));
+        }});
+
+        document.addEventListener('mouseup', () => {{
+            isDragging = false;
+        }});
+
+        // --- 初始加载 ---
+        window.onload = updateImage;
     </script>
 </body>
 </html>
 """
 
 
-def create_tool(npy_path, output_html_path):
-    """
-    加载NPY文件，转换为HU值，并生成一个交互式的HTML工具。
-    """
-    print(f"--- Loading NPY file: {npy_path} ---")
-    if not os.path.exists(npy_path):
-        print(f"Error: File not found at {npy_path}")
-        return
+def create_viewer(npy_path, output_path):
+    print(f"--- 正在分析文件: {npy_path} ---")
+    try:
+        data = np.load(npy_path)
+    except FileNotFoundError:
+        print(f"错误: 文件未找到 '{npy_path}'")
+        sys.exit(1)
+    except Exception as e:
+        print(f"错误: 加载NPY文件失败。 {e}")
+        sys.exit(1)
 
-    # 1. 加载并转换为HU值
-    proj_data = np.load(npy_path)
-    proj_data = np.nan_to_num(proj_data)
+    if data.ndim != 2:
+        print(f"错误: 此脚本仅支持2D NumPy数组，但您的数据维度为 {data.ndim}。")
+        sys.exit(1)
 
-    mu_min, mu_max = np.min(proj_data), np.max(proj_data)
-    if mu_max - mu_min < 1e-6:
-        a, b = 0, HU_AIR
-    else:
-        a = (HU_HIGH_DENSITY - HU_AIR) / (mu_max - mu_min)
-        b = HU_AIR - a * mu_min
-    hu_image = a * proj_data + b
+    data_min = float(data.min())
+    data_max = float(data.max())
+    data_mean = float(data.mean())
+    data_std = float(data.std())
+    img_height, img_width = data.shape
 
-    height, width = hu_image.shape
-    min_hu, max_hu = int(np.floor(np.min(hu_image))), int(np.ceil(np.max(hu_image)))
+    print("\n--- 数据统计 ---")
+    print(f"数据类型 (dtype): {data.dtype}")
+    print(f"数据形状 (shape): {data.shape}")
+    print(f"最小值: {data_min:.6f}")
+    print(f"最大值: {data_max:.6f}")
+    print(f"平均值: {data_mean:.6f}")
+    print(f"标准差: {data_std:.6f}")
 
-    # --- 【关键修正】 ---
-    # 旧方法: ww_range = max_hu - min_hu
-    # 新方法: 使用一个固定的、足够大的值，确保能设置宽骨窗
-    WW_SLIDER_MAX = 5000
-    # --- 【修正结束】 ---
+    data_range = data_max - data_min
 
-    # 2. 设置合理的默认值
-    default_wl = int((min_hu + max_hu) / 2)
-    default_ww = int((max_hu - min_hu) * 0.4)  # 默认窗宽仍基于数据范围，但滑块上限更高
+    slider_min_level = data_min
+    slider_max_level = data_max
 
-    # 3. 将2D HU数据扁平化并转换为JSON列表
-    hu_data_flat = hu_image.flatten().tolist()
-    hu_data_json = json.dumps(hu_data_flat)
+    # 窗宽的最小值不能为0，设为一个很小的正数
+    slider_min_width = max(data_range / 2000.0, 1e-9)
+    slider_max_width = data_range
 
-    print(f"Image Dimensions: {width}x{height}")
-    print(f"Calculated HU Range: [{min_hu}, {max_hu}]")
-    print(f"Window Width Slider Max set to: {WW_SLIDER_MAX}")
+    slider_step = data_range / 2000.0
 
-    # 4. 填充HTML模板
-    final_html = HTML_TEMPLATE.format(
-        width=width,
-        height=height,
-        min_hu=min_hu,
-        max_hu=max_hu,
-        ww_max_value=WW_SLIDER_MAX,  # <--- 使用新的固定最大值
-        default_wl=default_wl,
-        default_ww=default_ww,
-        filename=os.path.basename(npy_path),
-        hu_data_json=hu_data_json
+    default_level = (data_max + data_min) / 2.0
+    default_width = data_range
+
+    json_data = json.dumps(data.tolist())
+
+    html_content = HTML_TEMPLATE.format(
+        file_path=os.path.basename(npy_path),
+        data_shape=str(data.shape),
+        data_min=data_min,
+        data_max=data_max,
+        data_mean=data_mean,
+        data_std=data_std,
+        img_width=img_width,
+        img_height=img_height,
+        json_data=json_data,
+        slider_min_level=slider_min_level,
+        slider_max_level=slider_max_level,
+        slider_min_width=slider_min_width,
+        slider_max_width=slider_max_width,
+        slider_step=f"{slider_step:.8f}",
+        default_level=f"{default_level:.6f}",
+        default_width=f"{default_width:.6f}",
     )
 
-    # 5. 写入文件
-    with open(output_html_path, 'w', encoding='utf-8') as f:
-        f.write(final_html)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
 
-    print(f"\n--- Success! ---")
-    print(f"Interactive tool has been re-generated at: {output_html_path}")
-    print("You can now open this HTML file in your web browser.")
+    print(f"\n--- 操作成功 ---")
+    print(f"交互式查看器已保存到: {output_path}")
+    print("请在您的网页浏览器中打开此文件。")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Create an interactive HTML tool to find the optimal Window Width (WW) and Window Level (WL) for a .npy projection file.",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    parser.add_argument(
-        'input_npy',
-        type=str,
-        help="Path to the input .npy projection file."
-    )
-    parser.add_argument(
-        '-o', '--output',
-        type=str,
-        default='windowing_tool1.html',
-        help="Path for the output HTML file. (Default: windowing_tool.html)"
-    )
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="从一个2D .npy 文件创建一个具备专业窗宽窗位调节功能的HTML查看器。")
+    parser.add_argument("npy_file", help="输入的 .npy 文件路径。")
+    parser.add_argument("-o", "--output", help="输出的 HTML 文件路径。默认为 'dicom_style_viewer.html'。")
+
     args = parser.parse_args()
-    create_tool(args.input_npy, args.output)
 
+    output_filename = args.output if args.output else "dicom_style_viewer.html"
 
-if __name__ == '__main__':
-    main()
+    create_viewer(args.npy_file, output_filename)

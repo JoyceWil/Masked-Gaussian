@@ -1,5 +1,13 @@
-# r2_gaussian/dataset/cameras.py (已更新)
-import os
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
 import sys
 import torch
 from torch import nn
@@ -23,7 +31,6 @@ class Camera(nn.Module):
         image,
         image_name,
         uid,
-        args,
         trans=np.array([0.0, 0.0, 0.0]),
         scale=1.0,
         data_device="cuda",
@@ -53,25 +60,6 @@ class Camera(nn.Module):
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
 
-        # 【修改2】动态加载所有掩码
-        # 检查并加载 soft_mask
-        if hasattr(args, 'soft_mask_dir') and args.soft_mask_dir:
-            soft_mask_path = os.path.join(args.soft_mask_dir, self.image_name + ".npy")
-            if os.path.exists(soft_mask_path):
-                self.soft_mask = torch.from_numpy(np.load(soft_mask_path)).float()
-
-        # 检查并加载 core_mask
-        if hasattr(args, 'core_mask_dir') and args.core_mask_dir:
-            core_mask_path = os.path.join(args.core_mask_dir, self.image_name + ".npy")
-            if os.path.exists(core_mask_path):
-                self.core_mask = torch.from_numpy(np.load(core_mask_path)).float()
-
-        # 检查并加载 air_mask
-        if hasattr(args, 'air_mask_dir') and args.air_mask_dir:
-            air_mask_path = os.path.join(args.air_mask_dir, self.image_name + ".npy")
-            if os.path.exists(air_mask_path):
-                self.air_mask = torch.from_numpy(np.load(air_mask_path)).float()
-
         self.trans = trans
         self.scale = scale
 
@@ -97,7 +85,6 @@ class Camera(nn.Module):
 
 
 class MiniCam:
-    # ... (MiniCam 类保持不变) ...
     def __init__(
         self,
         width,

@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from scipy.signal import find_peaks
 from skimage.measure import shannon_entropy
+import json
+
 
 def convert_mu_to_hu(mu_image: np.ndarray) -> np.ndarray:
     """将原始的mu值（衰减系数）图像通过线性映射转换为HU（亨氏单位）图像。"""
@@ -25,17 +27,46 @@ def convert_mu_to_hu(mu_image: np.ndarray) -> np.ndarray:
         return hu_image.astype(np.float32)
 
 
-def apply_windowing(hu_image: np.ndarray, window_level: int, window_width: int) -> np.ndarray:
-    """根据给定的窗位(WL)和窗宽(WW)将HU值图像转换为归一化的[0, 1]软掩码。"""
+def _sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
+def apply_windowing(hu_image: np.ndarray, window_level: int, window_width: int, use_sigmoid: bool = True) -> np.ndarray:
+    """
+    根据给定的窗位(WL)和窗宽(WW)将HU值图像转换为归一化的[0, 1]软掩码。
+
+    Args:
+        hu_image (np.ndarray): HU值图像。
+        window_level (int): 窗位。
+        window_width (int): 窗宽。
+        use_sigmoid (bool): 是否使用平滑的Sigmoid过渡。True为推荐。
+
+    Returns:
+        np.ndarray: 归一化的软掩码。
+    """
     min_hu = window_level - (window_width / 2.0)
     max_hu = window_level + (window_width / 2.0)
-    soft_mask = hu_image.astype(np.float32)
-    np.clip(soft_mask, min_hu, max_hu, out=soft_mask)
-    if window_width == 0:
-        return np.zeros_like(soft_mask)
-    soft_mask = (soft_mask - min_hu) / window_width
-    return soft_mask
 
+    if window_width == 0:
+        return np.zeros_like(hu_image, dtype=np.float32)
+
+    if use_sigmoid:
+        # 使用平滑的Sigmoid函数来代替硬阈值
+        # k ≈ 8 / width (使得在边界处斜率较陡，但仍平滑)
+        k = 8.0 / window_width
+        lower_bound_sigmoid = _sigmoid(k * (hu_image - min_hu))
+        upper_bound_sigmoid = _sigmoid(-k * (hu_image - max_hu))
+        soft_mask = lower_bound_sigmoid * upper_bound_sigmoid
+        return soft_mask.astype(np.float32)
+    else:
+        # 原始的clip方法
+        soft_mask = hu_image.astype(np.float32)
+        np.clip(soft_mask, min_hu, max_hu, out=soft_mask)
+        soft_mask = (soft_mask - min_hu) / window_width
+        return soft_mask
+
+
+# ... _find_optimal_window 函数保持不变 ...
 def _find_optimal_window(
         all_hu_images: list,
         peak_map: dict,
@@ -60,6 +91,7 @@ def _find_optimal_window(
     foreground_hu = all_hu_values[(all_hu_values > -500) & (all_hu_values < 2500)]
 
     std_hu = np.std(foreground_hu[(foreground_hu > target_hu - 150) & (foreground_hu < target_hu + 150)])
+    if std_hu < 1: std_hu = 50  # 防止std过小
     wl_start = int(target_hu - 1.5 * std_hu)
     wl_stop = int(target_hu + 1.5 * std_hu)
     wl_step = max(5, int(std_hu / 10))
@@ -69,8 +101,10 @@ def _find_optimal_window(
 
     wls_to_search = range(wl_start, wl_stop, wl_step)
     wws_to_search = range(ww_start, ww_stop, ww_step)
-    if not wls_to_search or not wws_to_search:
-        print(f"   - [Auto] 错误: 为'{target_class}'自动计算的搜索范围为空。跳过。")
+    if not list(wls_to_search) or not list(wws_to_search):
+        print(f"   - [Auto] 警告: 为'{target_class}'自动计算的搜索范围为空。使用默认值。")
+        if target_class == 'soft': return {'wl': 40, 'ww': 400}
+        if target_class == 'hard': return {'wl': 300, 'ww': 1500}
         return None
 
     best_entropy = -1
@@ -81,10 +115,10 @@ def _find_optimal_window(
     with tqdm(total=total_iterations, desc=f"   - [Auto] 搜索'{target_class}'窗", leave=False) as pbar:
         for wl in wls_to_search:
             for ww in wws_to_search:
-                all_soft_masks = apply_windowing(hu_stack, wl, ww)
+                # 在搜索时，使用原始的clip方法可能更快更稳定
+                all_soft_masks = apply_windowing(hu_stack, wl, ww, use_sigmoid=False)
                 all_masks_uint8 = (all_soft_masks * 255).astype(np.uint8)
 
-                # 使用更鲁棒的约束熵计算
                 current_entropies = []
                 for i in range(len(all_hu_images)):
                     mask_uint8 = all_masks_uint8[i]
@@ -105,6 +139,8 @@ def _find_optimal_window(
     print(f"   - [Auto] '{target_class}' 优化完成! 最优WL: {optimal_wl}, 最优WW: {optimal_ww}")
     return {'wl': optimal_wl, 'ww': optimal_ww}
 
+
+# ... check_and_generate_masks 函数 ...
 def check_and_generate_masks(
         source_path: str,
         pre_threshold_ratio: float = 0.5,
@@ -112,14 +148,6 @@ def check_and_generate_masks(
 ) -> (str, str):
     """
     【最终全自动版】检查掩码是否存在，如果不存在，则通过分析【所有】投影找到最优窗，并生成软掩码。
-
-    Args:
-        source_path (str): 场景的根目录 (例如 'data/.../0_chest_cone')。
-        pre_threshold_ratio (float): 优化硬质窗时，用于约束熵计算的阈值比例。
-        save_previews (bool): 是否保存PNG格式的预览图和HU直方图。
-
-    Returns:
-        tuple[str, str]: 返回 (软组织掩码目录, 核心骨架掩码目录) 的路径。
     """
     print("   - 正在执行【最终全自动】窗宽窗位软掩码生成流程...")
 
@@ -154,10 +182,12 @@ def check_and_generate_masks(
     peaks, _ = find_peaks(hist, prominence=np.max(hist) * 0.005, distance=50)
 
     if len(peaks) < 2:
-        raise RuntimeError("未能检测到至少两个显著的物质峰值。无法自动区隔软/硬质材料。")
+        print("   - [Auto] 警告: 未能检测到至少两个显著的物质峰值。将使用默认窗宽窗位。")
+        peak_map = {'soft': 40, 'hard': 300}
+    else:
+        peak_hus = sorted([int(bin_centers[p]) for p in peaks])
+        peak_map = {'soft': peak_hus[0], 'hard': peak_hus[-1]}
 
-    peak_hus = sorted([int(bin_centers[p]) for p in peaks])
-    peak_map = {'soft': peak_hus[0], 'hard': peak_hus[-1]}
     print(f"   - [Auto] 物质分析报告: '软质'峰(Soft) @ {peak_map['soft']} HU, '硬质'峰(Hard) @ {peak_map['hard']} HU")
 
     if save_previews:
@@ -165,12 +195,14 @@ def check_and_generate_masks(
         os.makedirs(base_mask_dir, exist_ok=True)
         plt.figure(figsize=(12, 6));
         plt.plot(bin_centers, hist);
-        plt.scatter(bin_centers[peaks], hist[peaks], color='red', zorder=5)
+        if len(peaks) >= 2:
+            plt.scatter(bin_centers[peaks], hist[peaks], color='red', zorder=5)
         plt.title('Automated HU Peak Detection');
         plt.xlabel('HU');
         plt.ylabel('Frequency');
         plt.grid(True, alpha=0.3);
         plt.savefig(hist_path)
+        plt.close()
         print(f"   - [Auto] HU分布图已保存至: {hist_path}")
 
     # 5. 分别为 'soft' (tissue) 和 'hard' (bone) 找到最优窗
@@ -191,15 +223,16 @@ def check_and_generate_masks(
     for directory in output_dirs:
         os.makedirs(directory, exist_ok=True)
 
-    # 注意：这里我们已经加载了所有HU图像，可以直接复用，无需重新加载文件
     for i, file_path in enumerate(tqdm(file_list, desc="   - [Generate] 生成掩码", leave=False)):
         base_name = osp.basename(file_path)
         file_name_without_ext = osp.splitext(base_name)[0]
 
-        hu_image = all_hu_images[i]  # 直接复用已加载的HU图像
+        hu_image = all_hu_images[i]
 
-        tissue_mask = apply_windowing(hu_image, optimal_tissue_window['wl'], optimal_tissue_window['ww'])
-        bone_mask = apply_windowing(hu_image, optimal_bone_window['wl'], optimal_bone_window['ww'])
+        # 在最终生成时，使用我们推荐的平滑Sigmoid方法
+        tissue_mask = apply_windowing(hu_image, optimal_tissue_window['wl'], optimal_tissue_window['ww'],
+                                      use_sigmoid=True)
+        bone_mask = apply_windowing(hu_image, optimal_bone_window['wl'], optimal_bone_window['ww'], use_sigmoid=True)
 
         np.save(osp.join(tissue_mask_npy_dir, f"{file_name_without_ext}.npy"), tissue_mask)
         np.save(osp.join(bone_mask_npy_dir, f"{file_name_without_ext}.npy"), bone_mask)
@@ -215,12 +248,10 @@ def check_and_generate_masks(
     try:
         optimal_windows = {'tissue': optimal_tissue_window, 'bone': optimal_bone_window}
         windows_json_path = osp.join(base_mask_dir, 'optimal_windows.json')
-        import json
         with open(windows_json_path, 'w') as f:
             json.dump(optimal_windows, f, indent=4)
         print(f"   - 最优窗参数已保存至: {windows_json_path}")
     except Exception as e:
         print(f"   - 警告: 保存最优窗参数到JSON文件失败: {e}")
 
-    # 7. 返回生成的NPY目录路径
     return tissue_mask_npy_dir, bone_mask_npy_dir

@@ -12,6 +12,7 @@ import argparse
 import time
 
 
+# <<< 新增：从 train.py 迁移过来的完整CT可视化函数 >>>
 def generate_comprehensive_ct_visualization(model_path: str, latest_iter: int, tb_writer=None):
     """
     从 train.py 迁移过来的、功能更全面的CT切片可视化函数。

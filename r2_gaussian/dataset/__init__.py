@@ -1,5 +1,3 @@
-# r2_gaussian/dataset/__init__.py (已移除噪声代码并优化)
-
 import os
 import sys
 import random
@@ -13,7 +11,7 @@ sys.path.append("./")
 from r2_gaussian.gaussian import GaussianModel
 from r2_gaussian.arguments import ModelParams
 from r2_gaussian.dataset.dataset_readers import sceneLoadTypeCallbacks
-from r2_gaussian.utils.camera_utils import cameraList_from_camInfos, Camera
+from r2_gaussian.utils.camera_utils import cameraList_from_camInfos
 from r2_gaussian.utils.general_utils import t2a
 
 
@@ -21,37 +19,28 @@ class Scene:
     gaussians: GaussianModel
 
     def __init__(
-            self,
-            args: ModelParams,
-            shuffle=True,
+        self,
+        args: ModelParams,
+        shuffle=True,
     ):
         self.model_path = args.model_path
-        self.loaded_iter = None
-        self.gaussians = None
 
-        # --- [ROI掩码逻辑] ---
-        self.soft_mask_dir = args.soft_mask_dir
-        self.core_mask_dir = args.core_mask_dir
-
-        # 恢复了原始的、更安全的存在性检查。
-        # train.py中的补丁会确保这里的路径是正确的，从而使此条件为True。
-        self.use_roi_masks = self.soft_mask_dir and self.core_mask_dir and \
-                             osp.exists(self.soft_mask_dir) and osp.exists(self.core_mask_dir)
-
-        if self.use_roi_masks:
-            print("2D动态掩码目录已找到，ROI管理将被激活。")
-            print(f"  - 软组织掩码目录: {self.soft_mask_dir}")
-            print(f"  - 核心骨架掩码目录: {self.core_mask_dir}")
-        else:
-            print("未提供有效的2D掩码目录，ROI管理将不会被激活。")
-
-        # --- [噪声相关代码已根据您的要求移除] ---
+        self.train_cameras = {}
+        self.test_cameras = {}
 
         # Read scene info
         if osp.exists(osp.join(args.source_path, "meta_data.json")):
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.eval)
+            # Blender format
+            scene_info = sceneLoadTypeCallbacks["Blender"](
+                args.source_path,
+                args.eval,
+            )
         elif args.source_path.split(".")[-1] in ["pickle", "pkl"]:
-            scene_info = sceneLoadTypeCallbacks["NAF"](args.source_path, args.eval)
+            # NAF format
+            scene_info = sceneLoadTypeCallbacks["NAF"](
+                args.source_path,
+                args.eval,
+            )
         else:
             assert False, f"Could not recognize scene type: {args.source_path}."
 
@@ -59,36 +48,13 @@ class Scene:
             random.shuffle(scene_info.train_cameras)
             random.shuffle(scene_info.test_cameras)
 
+        # Load cameras
         print("Loading Training Cameras")
         self.train_cameras = cameraList_from_camInfos(scene_info.train_cameras, args)
         print("Loading Test Cameras")
         self.test_cameras = cameraList_from_camInfos(scene_info.test_cameras, args)
 
-        # --- [掩码加载逻辑] ---
-        if self.use_roi_masks:
-            print("正在为训练相机加载2D掩码...")
-            for camera in self.train_cameras:
-                # 兼容 .npy 和 .png/.jpg 等多种可能的图像扩展名
-                base_name_with_ext = osp.basename(camera.image_name)
-                base_name = osp.splitext(base_name_with_ext)[0] + '.npy'
-
-                soft_mask_path = osp.join(self.soft_mask_dir, base_name)
-                core_mask_path = osp.join(self.core_mask_dir, base_name)
-
-                if osp.exists(soft_mask_path):
-                    camera.soft_mask = torch.from_numpy(np.load(soft_mask_path)).float()
-                else:
-                    print(f"警告: 找不到视图 {base_name} 对应的软组织掩码，将使用空掩码。")
-                    h, w = camera.image_height, camera.image_width
-                    camera.soft_mask = torch.zeros((h, w), dtype=torch.float32)
-
-                if osp.exists(core_mask_path):
-                    camera.core_mask = torch.from_numpy(np.load(core_mask_path)).float()
-                else:
-                    print(f"警告: 找不到视图 {base_name} 对应的核心骨架掩码，将使用空掩码。")
-                    h, w = camera.image_height, camera.image_width
-                    camera.core_mask = torch.zeros((h, w), dtype=torch.float32)
-
+        # Set up some parameters
         self.vol_gt = scene_info.vol
         self.scanner_cfg = scene_info.scanner_cfg
         self.scene_scale = scene_info.scene_scale
@@ -101,11 +67,6 @@ class Scene:
             ],
             dim=0,
         )
-        self.grid_center = torch.tensor(self.scanner_cfg["offOrigin"], dtype=torch.float32)
-        sVoxel = torch.tensor(self.scanner_cfg["sVoxel"], dtype=torch.float32)
-        nVoxel = torch.tensor(self.scanner_cfg["nVoxel"], dtype=torch.float32)
-        self.voxel_size = sVoxel / nVoxel
-        print("FDK体积和坐标转换信息已准备好。")
 
     def save(self, iteration, queryfunc):
         point_cloud_path = osp.join(

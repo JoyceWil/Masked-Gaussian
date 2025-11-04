@@ -1,3 +1,14 @@
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -91,42 +102,3 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
-
-
-def gradient_difference_loss(pred, target, alpha=1.0):
-    """
-    【修正版】计算梯度差异损失 (GDL)。
-    此版本经过简化，专门为单通道图像（如CT）设计，避免了复杂且易错的分组卷积。
-    """
-    # 检查输入是否为单通道，如果不是则报错，避免后续出现问题
-    if pred.shape[1] != 1 or target.shape[1] != 1:
-        raise ValueError(
-            f"Gradient Difference Loss (GDL) 期望输入为单通道图像, "
-            f"但收到的预测图像通道为 {pred.shape[1]}, "
-            f"目标图像通道为 {target.shape[1]}."
-        )
-
-    # 定义Sobel算子核。对于单通道输入，核的形状应为 [out_channels, in_channels, kH, kW]
-    # 这里 out_channels=1, in_channels=1
-    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
-                           dtype=torch.float32, device=pred.device).view(1, 1, 3, 3)
-    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
-                           dtype=torch.float32, device=pred.device).view(1, 1, 3, 3)
-
-    # 直接对单通道图像进行标准2D卷积，无需 'groups' 参数
-    pred_grad_x = F.conv2d(pred, sobel_x, padding=1)
-    pred_grad_y = F.conv2d(pred, sobel_y, padding=1)
-    target_grad_x = F.conv2d(target, sobel_x, padding=1)
-    target_grad_y = F.conv2d(target, sobel_y, padding=1)
-
-    # 计算梯度差异
-    grad_diff_x = torch.abs(pred_grad_x - target_grad_x)
-    grad_diff_y = torch.abs(pred_grad_y - target_grad_y)
-
-    # 根据alpha计算最终损失
-    if alpha == 1.0:
-        loss = torch.mean(grad_diff_x + grad_diff_y)
-    else:
-        loss = torch.mean(torch.pow(grad_diff_x, alpha) + torch.pow(grad_diff_y, alpha))
-
-    return loss

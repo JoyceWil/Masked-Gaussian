@@ -25,22 +25,40 @@ def convert_mu_to_hu_torch(mu_image: torch.Tensor) -> torch.Tensor:
         return hu_image
 
 
-def apply_windowing_torch(hu_image: torch.Tensor, window_level: int, window_width: int) -> torch.Tensor:
+def apply_windowing_torch(hu_tensor, wl, ww, apply_sigmoid=True):
     """
-    【PyTorch版】根据给定的窗位(WL)和窗宽(WW)将HU值图像转换为归一化的[0, 1]软掩码。
-    这个函数现在完全可微。
+    对HU值的PyTorch张量应用窗函数。
+
+    Args:
+        hu_tensor (torch.Tensor): 输入的HU值张量。
+        wl (float): 窗位 (Window Level)。
+        ww (float): 窗宽 (Window Width)。
+        apply_sigmoid (bool): 【修改】决定是否应用sigmoid。默认为是为保持旧功能兼容。
+                              在BCEWithLogitsLoss中应设为False。
+
+    Returns:
+        torch.Tensor: 经过窗函数处理后的张量。
+                      如果 apply_sigmoid=True，范围在(0,1)。
+                      如果 apply_sigmoid=False，范围是无界的logits。
     """
-    min_hu = window_level - (window_width / 2.0)
-    max_hu = window_level + (window_width / 2.0)
+    lower_bound = wl - ww / 2
+    upper_bound = wl + ww / 2
 
-    # torch.clip 替代 np.clip
-    soft_mask = torch.clip(hu_image, min_hu, max_hu)
+    # 将HU值归一化到窗函数定义的范围内
+    # 公式：(hu - lower_bound) / (upper_bound - lower_bound)
+    # 为了让窗的中心(wl)映射到0.5，我们需要一个更适合sigmoid的映射
+    # 我们将[lower_bound, upper_bound]线性映射到[-4, 4]左右，这是一个对sigmoid友好的区间
+    # 当 hu == wl, logit = 0, sigmoid(0) = 0.5
+    # 当 hu == lower_bound, logit = -4, sigmoid(-4) ~= 0.018
+    # 当 hu == upper_bound, logit = 4, sigmoid(4) ~= 0.982
+    # 我们使用 8 / ww 作为缩放因子
 
-    if window_width == 0:
-        return torch.zeros_like(soft_mask)
+    logits = (hu_tensor - wl) * (8.0 / ww)
 
-    soft_mask = (soft_mask - min_hu) / window_width
-    return soft_mask
+    if apply_sigmoid:
+        return torch.sigmoid(logits)
+    else:
+        return logits
 
 
 # --- 验证部分 ---
