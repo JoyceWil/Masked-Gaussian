@@ -59,7 +59,7 @@ class OptimizationParams(ParamGroup):
         self.max_scale = None  # percent of volume size
         self.max_num_gaussians = 500_000
 
-        self.lambda_s_map = 1.35
+        self.lambda_s_map = 1.2
 
         super().__init__(parser, "Optimization Parameters")
 
