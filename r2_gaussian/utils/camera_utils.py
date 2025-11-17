@@ -1,13 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
 import sys
 import torch
 import numpy as np
@@ -18,6 +8,25 @@ from r2_gaussian.dataset.cameras import Camera
 
 def loadCam(args, id, cam_info):
     gt_image = torch.from_numpy(cam_info.image)[None]
+
+    # <<< 修改: 增加对 s_map 类型的判断
+    s_map_data = getattr(cam_info, 's_map', None)
+    s_map_tensor = None
+    if s_map_data is not None:
+        # 检查 s_map_data 的类型
+        if isinstance(s_map_data, np.ndarray):
+            # 如果是 numpy array, 就从 numpy 转换
+            s_map_tensor = torch.from_numpy(s_map_data)[None]
+        elif isinstance(s_map_data, torch.Tensor):
+            # 如果已经是一个 tensor, 就直接使用
+            # 确保它有和 gt_image 一样的批次维度
+            if len(s_map_data.shape) == 2: # 假设 s_map 是 HxW
+                 s_map_tensor = s_map_data[None]
+            else:
+                 s_map_tensor = s_map_data
+        else:
+            print(f"[Warning] s_map has an unexpected type: {type(s_map_data)}")
+    # >>>>> 结束修改
 
     return Camera(
         colmap_id=cam_info.uid,
@@ -31,6 +40,7 @@ def loadCam(args, id, cam_info):
         image=gt_image,
         image_name=cam_info.image_name,
         uid=id,
+        s_map=s_map_tensor,
         data_device=args.data_device,
     )
 

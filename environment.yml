@@ -4,7 +4,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - cudatoolkit=11.6
+  - cudatoolkit=11.8
   - plyfile
   - python=3.9
   - pip=22.3.1
@@ -25,5 +25,5 @@ dependencies:
     - pyvista
     - Cython==0.29.36
     - open3d==0.18.0
-    - -e r2_gaussian/submodules/simple-knn
-    - -e r2_gaussian/submodules/xray-gaussian-rasterization-voxelization
+#    - -e r2_gaussian/submodules/simple-knn
+#    - -e r2_gaussian/submodules/xray-gaussian-rasterization-voxelization

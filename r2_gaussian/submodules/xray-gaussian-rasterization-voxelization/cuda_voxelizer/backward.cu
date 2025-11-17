@@ -15,6 +15,10 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 
 // Backward pass for the conversion of scale and rotation to a 
 // 3D covariance matrix for each Gaussian. 

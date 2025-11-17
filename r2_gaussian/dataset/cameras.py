@@ -31,6 +31,7 @@ class Camera(nn.Module):
         image,
         image_name,
         uid,
+        s_map=None,  # <<< 新增: 添加 s_map 参数
         trans=np.array([0.0, 0.0, 0.0]),
         scale=1.0,
         data_device="cuda",
@@ -59,6 +60,13 @@ class Camera(nn.Module):
         self.original_image = image.to(self.data_device)
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
+
+        # <<< 新增: 处理并存储 s_map
+        if s_map is not None:
+            self.s_map = s_map.to(self.data_device)
+        else:
+            self.s_map = None
+        # >>>>> 结束新增
 
         self.trans = trans
         self.scale = scale

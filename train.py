@@ -24,6 +24,16 @@ from r2_gaussian.utils.plot_utils import show_two_slice
 from r2_gaussian.gaussian.structure_guardian import StructureGuardian
 
 
+def weighted_l1_loss(pred_image, gt_image, s_map, beta):
+    """
+    计算空间加权的L1损失。
+    权重 W = 1 + beta * s_map
+    """
+    weight_map = 1.0 + beta * s_map
+    loss = torch.abs(pred_image - gt_image) * weight_map
+    return loss.mean()
+
+
 def _create_3d_sobel_kernels(device):
     """创建3x3x3的3D Sobel算子核"""
     kernel_x = torch.tensor([
@@ -35,31 +45,6 @@ def _create_3d_sobel_kernels(device):
     kernel_z = kernel_x.permute(2, 1, 0)
     # 返回 (out_channels=3, in_channels=1, D, H, W)
     return torch.stack([kernel_x, kernel_y, kernel_z], dim=0).unsqueeze(1).to(device)
-
-
-def _sample_p_vol_patch(p_vol_i_channel_unsqueezed, center, n_voxel, s_voxel, scene_bbox):
-    """
-    使用 F.grid_sample 从 P_vol I-channel (通道 0) 中采样一个 patch。
-    """
-    with torch.no_grad():
-        res_x, res_y, res_z = n_voxel[0].item(), n_voxel[1].item(), n_voxel[2].item()
-        coords_x = torch.arange(res_x, device=center.device)
-        coords_y = torch.arange(res_y, device=center.device)
-        coords_z = torch.arange(res_z, device=center.device)
-        grid_z, grid_y, grid_x = torch.meshgrid(coords_z, coords_y, coords_x, indexing='ij')
-        coords = torch.stack([grid_x, grid_y, grid_z], dim=-1)
-        dVoxel = s_voxel / n_voxel
-        world_coords_patch = center + (coords + 0.5) * dVoxel - s_voxel / 2
-        norm_coords = (world_coords_patch - scene_bbox[0]) / (scene_bbox[1] - scene_bbox[0]) * 2 - 1
-        grid = norm_coords.unsqueeze(0)
-        patch_gt = F.grid_sample(
-            p_vol_i_channel_unsqueezed,
-            grid,
-            mode='bilinear',
-            padding_mode='border',
-            align_corners=False
-        )
-        return patch_gt
 
 
 def training(
@@ -77,6 +62,29 @@ def training(
     scene = Scene(dataset, shuffle=False)
     scanner_cfg = scene.scanner_cfg
     bbox = scene.bbox
+
+    # >>>>> 开始修改: 打印分阶段训练配置信息 <<<<<
+    if opt.phase_switch_iter > 0:
+        print("===============================================================")
+        print("Phased Weighted Training (Scheme B) is ENABLED.")
+        print(f"- Phase Switch Iteration: {opt.phase_switch_iter}")
+        print(f"- Phase 1 Beta (0 -> {opt.phase_switch_iter}): {opt.beta_phase1}")
+        print(f"- Phase 2 Beta ({opt.phase_switch_iter} -> end): {opt.beta_phase2}")
+        if opt.use_beta_annealing:
+            print("- Beta Transition: Smooth Annealing")
+        else:
+            print("- Beta Transition: Hard Switch")
+
+        if opt.use_structure_protection or opt.use_structure_aware_densification:
+            print(f"- Structure Guardian will be ACTIVE in Phase 1 and DISABLED in Phase 2.")
+        print("===============================================================")
+    else:
+        # 非分阶段训练，使用 beta_phase2 作为恒定 beta 值
+        if opt.beta_phase2 > 0.0:
+            print(f"Spatially-Weighted Loss is ENABLED with constant beta = {opt.beta_phase2}.")
+        else:
+            print("Spatially-Weighted Loss is DISABLED.")
+    # >>>>> 结束修改 <<<<<
 
     volume_to_world = max(scanner_cfg["sVoxel"])
     max_scale = opt.max_scale * volume_to_world if opt.max_scale else None
@@ -104,10 +112,8 @@ def training(
         (model_params, first_iter) = torch.load(checkpoint, map_location=device)
         gaussians.restore(model_params, opt)
 
-    # 将bbox移动到与高斯模型相同的设备上
     bbox = bbox.to(gaussians.get_xyz.device)
 
-    # 初始化结构守护者 (Structure Guardian)
     guardian = None
     if opt.use_structure_protection or opt.use_structure_aware_densification:
         print("Structure Guardian is ENABLED (using static P_vol).")
@@ -129,30 +135,18 @@ def training(
     else:
         print("Structure Guardian is DISABLED.")
 
-    # 设置损失函数
-    use_tv = opt.lambda_tv > 0
-    use_struct_loss = opt.lambda_struct > 0
+    # 确定是否在任何阶段使用空间加权损失
+    use_s_map_loss = (opt.phase_switch_iter > 0) or (opt.beta_phase2 > 0.0)
 
+    use_tv = opt.lambda_tv > 0
     tv_vol_size = 0
     tv_vol_nVoxel = None
     tv_vol_sVoxel = None
 
-    # 3D损失的共享设置
-    if use_tv or use_struct_loss:
+    if use_tv:
         tv_vol_size = opt.tv_vol_size
         tv_vol_nVoxel = torch.tensor([tv_vol_size, tv_vol_size, tv_vol_size], device=gaussians.get_xyz.device)
         tv_vol_sVoxel = (torch.tensor(scanner_cfg["dVoxel"], device=gaussians.get_xyz.device) * tv_vol_nVoxel)
-
-    # L_struct 专用资源加载
-    p_vol_i_channel_unsqueezed = None
-    if use_struct_loss:
-        print(f"3D Structural Loss (L_struct) is ENABLED with lambda={opt.lambda_struct}.")
-        p_vol_path = os.path.join(dataset.source_path, "P_vol.npy")
-        p_vol_i_channel = torch.from_numpy(np.load(p_vol_path)[..., 0]).float().to(gaussians.get_xyz.device)
-        p_vol_i_channel_unsqueezed = p_vol_i_channel.unsqueeze(0).unsqueeze(0)
-        print(f"Loaded P_vol I-channel for L_struct, shape (ZxYxX): {p_vol_i_channel.shape}")
-
-    if use_tv:
         print("Total variation loss is ENABLED.")
 
     iter_start = torch.cuda.Event(enable_timing=True)
@@ -168,6 +162,26 @@ def training(
 
         gaussians.update_learning_rate(iteration)
 
+        # >>>>> 开始修改: 实现分阶段的 beta 值计算 <<<<<
+        current_beta = 0.0
+        if use_s_map_loss:
+            if opt.phase_switch_iter > 0:  # 分阶段训练激活
+                if iteration < opt.phase_switch_iter:
+                    # 阶段一
+                    if opt.use_beta_annealing:
+                        # 平滑退火
+                        progress = iteration / opt.phase_switch_iter
+                        current_beta = opt.beta_phase1 + (opt.beta_phase2 - opt.beta_phase1) * progress
+                    else:
+                        # 硬切换，使用阶段一的 beta
+                        current_beta = opt.beta_phase1
+                else:
+                    # 阶段二
+                    current_beta = opt.beta_phase2
+            else:  # 分阶段训练未激活，使用恒定的 beta_phase2
+                current_beta = opt.beta_phase2
+        # >>>>> 结束修改 <<<<<
+
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
@@ -180,7 +194,16 @@ def training(
         gt_image = viewpoint_cam.original_image.to(device)
         loss = {"total": 0.0}
 
-        render_loss = l1_loss(image, gt_image)
+        # >>>>> 开始修改: 使用动态计算的 current_beta 计算损失 <<<<<
+        s_map = viewpoint_cam.s_map
+        # 检查是否启用加权损失、beta > 0 且当前相机有 s_map
+        if use_s_map_loss and current_beta > 0 and s_map is not None:
+            s_map = s_map.to(device)
+            render_loss = weighted_l1_loss(image, gt_image, s_map, current_beta)
+        else:
+            render_loss = l1_loss(image, gt_image)
+        # >>>>> 结束修改 <<<<<
+
         loss["render"] = render_loss
         loss["total"] += loss["render"]
 
@@ -190,7 +213,7 @@ def training(
             loss["total"] = loss["total"] + opt.lambda_dssim * loss_dssim
 
         vol_pred_patch = None
-        if use_tv or use_struct_loss:
+        if use_tv:
             tv_vol_center = (bbox[0] + tv_vol_sVoxel / 2) + (bbox[1] - tv_vol_sVoxel - bbox[0]) * torch.rand(3,
                                                                                                              device=gaussians.get_xyz.device)
             vol_pred_patch = query(gaussians, tv_vol_center, tv_vol_nVoxel, tv_vol_sVoxel, pipe)["vol"]
@@ -199,13 +222,6 @@ def training(
             loss_tv = tv_3d_loss(vol_pred_patch, reduction="mean")
             loss["tv"] = loss_tv
             loss["total"] = loss["total"] + opt.lambda_tv * loss_tv
-
-        if use_struct_loss and vol_pred_patch is not None:
-            i_map_gt_patch = _sample_p_vol_patch(p_vol_i_channel_unsqueezed, tv_vol_center, tv_vol_nVoxel,
-                                                 tv_vol_sVoxel, bbox)
-            loss_struct = l1_loss(vol_pred_patch.unsqueeze(0).unsqueeze(0), i_map_gt_patch)
-            loss["struct"] = loss_struct
-            loss["total"] = loss["total"] + opt.lambda_struct * loss_struct
 
         loss["total"].backward()
         iter_end.record()
@@ -217,6 +233,18 @@ def training(
             gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
             if iteration < opt.densify_until_iter:
+                # >>>>> 开始修改: 根据训练阶段控制 Structure Guardian <<<<<
+                guardian_for_densify = guardian
+                use_densify_aware = opt.use_structure_aware_densification
+
+                # 如果分阶段训练激活且进入第二阶段，则禁用 Guardian
+                if opt.phase_switch_iter > 0 and iteration >= opt.phase_switch_iter:
+                    if guardian is not None and iteration == opt.phase_switch_iter:
+                        tqdm.write(f"[ITER {iteration}] Entering Phase 2: Structure Guardian is now DISABLED.")
+                    guardian_for_densify = None
+                    use_densify_aware = False
+                # >>>>> 结束修改 <<<<<
+
                 if (iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0):
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
@@ -226,9 +254,9 @@ def training(
                         opt.max_num_gaussians,
                         densify_scale_threshold,
                         bbox,
-                        guardian,
+                        guardian_for_densify,  # 传递条件性 Guardian 对象
                         opt.structure_protection_threshold,
-                        opt.use_structure_aware_densification,
+                        use_densify_aware,  # 传递条件性增密标志
                         opt.structure_densification_threshold
                     )
 
@@ -258,6 +286,11 @@ def training(
             for l in loss: metrics["loss_" + l] = loss[l] if isinstance(loss[l], float) else loss[l].item()
             for param_group in gaussians.optimizer.param_groups: metrics[f"lr_{param_group['name']}"] = param_group[
                 "lr"]
+
+            # >>>>> 开始修改: 将 current_beta 添加到监控指标 <<<<<
+            metrics["beta_value"] = current_beta
+            # >>>>> 结束修改 <<<<<
+
             training_report(tb_writer, iteration, metrics, iter_start.elapsed_time(iter_end), testing_iterations, scene,
                             lambda x, y: render(x, y, pipe), queryfunc, device)
 
@@ -266,7 +299,12 @@ def training_report(tb_writer, iteration, metrics_train, elapsed, testing_iterat
                     queryFunc, device: torch.device):
     if tb_writer:
         for key in list(metrics_train.keys()):
-            tb_writer.add_scalar(f"train/{key}", metrics_train[key], iteration)
+            # >>>>> 开始修改: 将 beta_value 单独处理或确保其存在 <<<<<
+            if key == "beta_value":
+                tb_writer.add_scalar("train/beta_value", metrics_train[key], iteration)
+            else:
+                tb_writer.add_scalar(f"train/{key}", metrics_train[key], iteration)
+            # >>>>> 结束修改 <<<<<
         tb_writer.add_scalar("train/iter_time", elapsed, iteration)
         tb_writer.add_scalar("train/total_points", scene.gaussians.get_xyz.shape[0], iteration)
 
@@ -348,30 +386,33 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default=None)
 
-    # 添加GPU选择参数
     parser.add_argument("--gpu_id", type=int, default=0, help="ID of the GPU to use for training.")
 
-    # 结构保护 (Step 1)
     parser.add_argument("--use_structure_protection", action="store_true",
                         help="Enable P_vol-based structure pruning protection.")
     parser.add_argument("--structure_protection_threshold", type=float, default=0.1,
                         help="P_vol threshold to protect a gaussian from pruning.")
 
-    # 结构感知增密 (Step 2)
     parser.add_argument("--use_structure_aware_densification", action="store_true",
                         help="Enable P_vol-based structure-aware densification.")
     parser.add_argument("--structure_densification_threshold", type=float, default=0.0001,
                         help="P_vol threshold to allow densification in a region.")
 
-    # 3D 结构损失 (Step 0)
-    parser.add_argument("--lambda_struct", type=float, default=0.0,
-                        help="Weight for the 3D structural density loss (L_struct). Default 0.0=disabled.")
+    # >>>>> 开始修改: 添加分阶段加权训练 (方案B) 的参数 <<<<<
+    parser.add_argument("--phase_switch_iter", type=int, default=0,
+                        help="Iteration to switch training phases. Default 0 disables phased training.")
+    parser.add_argument("--beta_phase1", type=float, default=0.5,
+                        help="Beta for weighted L1 loss in phase 1. Also used as starting beta for annealing.")
+    parser.add_argument("--beta_phase2", type=float, default=3.0,
+                        help="Beta for weighted L1 loss in phase 2. Also used as constant beta if phased training is off.")
+    parser.add_argument("--use_beta_annealing", action="store_true",
+                        help="Enable smooth annealing of beta from beta_phase1 to beta_phase2.")
+    # >>>>> 结束修改 <<<<<
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     args.test_iterations.append(1)
 
-    # 设置GPU设备
     if not torch.cuda.is_available():
         print("CUDA is not available. This script requires a GPU. Exiting.")
         sys.exit(1)
@@ -391,7 +432,6 @@ if __name__ == "__main__":
         print(f"Loading configuration file from {args.config}")
         cfg = load_config(args.config)
         for key in list(cfg.keys()):
-            # 命令行参数优先于配置文件
             if args_dict.get(key) is None or args_dict.get(key) == parser.get_default(key):
                 args_dict[key] = cfg[key]
 
@@ -399,7 +439,6 @@ if __name__ == "__main__":
     opt = op.extract(args)
     pipe = pp.extract(args)
 
-    # 确保所有args参数都传递给opt对象
     for k, v in vars(args).items():
         if not hasattr(opt, k):
             setattr(opt, k, v)
@@ -418,12 +457,6 @@ if __name__ == "__main__":
 
     tb_writer = prepare_output_and_logger(args)
 
-    # 启动日志
-    if hasattr(opt, 'lambda_struct') and opt.lambda_struct > 0:
-        print(f"3D L_struct (Intensity) loss is ENABLED. Lambda: {opt.lambda_struct}")
-    else:
-        print(f"3D L_struct loss is DISABLED (lambda_struct: {getattr(opt, 'lambda_struct', 0.0)}).")
-
     print("Optimizing " + args.model_path)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
@@ -436,7 +469,7 @@ if __name__ == "__main__":
         args.save_iterations,
         args.checkpoint_iterations,
         args.start_checkpoint,
-        device,  # 传递设备对象
+        device,
     )
 
     if args.save_iterations:

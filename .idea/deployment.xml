@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="hezhipeng@172.17.19.8:22 password" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="hezhipeng@172.17.19.8:22 password (6)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="hezhipeng@172.17.19.8:22 password">
@@ -62,7 +62,7 @@
       <paths name="hezhipeng@172.17.19.8:22 password (6)">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/hezhipeng/Workbench/r2_gaussian-main" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
@@ -87,31 +87,10 @@
           </mappings>
         </serverdata>
       </paths>
-      <paths name="hezhipeng@172.17.71.123:22 password">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="hezhipeng@172.17.71.123:22 password (2)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
       <paths name="hezhipeng@172.17.71.123:22 password (3)">
         <serverdata>
           <mappings>
             <mapping deploy="/home/hezhipeng/Workbench/r2_gaussian-main" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="root@connect.nmb2.seetacloud.com:47955 password">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/Workbench/r2_gaussian-main" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>

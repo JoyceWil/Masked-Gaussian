@@ -329,6 +329,7 @@ def readNAFInfo(path, eval):
             s_map_tensor = None
             if use_s_map:
                 # NAF 格式没有文件名，我们根据索引来匹配
+                # 注意：这里假设S_map的文件名是4位补零的索引，如 0000.npy, 0001.npy ...
                 s_map_filename = f"{i_split + uid_offset:04d}.npy"
                 s_map_path = osp.join(s_map_dir, s_map_filename)
                 if osp.exists(s_map_path):

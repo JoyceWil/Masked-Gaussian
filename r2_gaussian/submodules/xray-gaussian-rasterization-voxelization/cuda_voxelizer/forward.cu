@@ -15,6 +15,10 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 // Forward method for converting scale and rotation properties of each
 // Gaussian to a 3D covariance matrix in world space. Also takes care
 // of quaternion normalization.
