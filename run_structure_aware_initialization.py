@@ -12,7 +12,7 @@ import time
 CONFIG = {
     "input_path": "data/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone/P_vol.npy",
     "output_ply_path": "data/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone/initialized_point_cloud.ply",
-    "output_npy_path": "data/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone/initial_gaussians.npy",
+    "output_npy_path": "data/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone/init_0_chest_cone.npy",
     "num_points": 50000,
 
     # 采样权重 (p(x) ∝ α·G(x) + β·W(x) + γ)

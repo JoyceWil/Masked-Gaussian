@@ -59,7 +59,7 @@ def run_reconstruction(args):
     # 原始几何参数的绝对值过小 (e.g., DSD=7.0)，可能导致TIGRE CUDA内核的数值不稳定。
     # 我们将所有长度单位乘以一个缩放因子，以将它们带入一个更常规的数值范围。
     # 这不会改变重建的几何形状，只会改变其绝对尺度。
-    scale_factor = 100.0
+    scale_factor = 1.0
     print(f"Applying a scaling factor of {scale_factor} to all length parameters to improve numerical stability.")
 
     geo.DSD = scanner_params['DSD'] * scale_factor
@@ -208,11 +208,11 @@ if __name__ == '__main__':
     parser.add_argument('--base_dir', type=str, required=True,
                         help="Path to the base directory of the dataset (e.g., 'data/synthetic_dataset/.../0_chest_cone').")
 
-    parser.add_argument('--algorithm', type=str, default='fdk',
+    parser.add_argument('--algorithm', type=str, default='sart',
                         choices=['fdk', 'sart', 'sirt', 'cgls'],
                         help="The reconstruction algorithm to use for the intensity volume. Default is 'fdk'.")
 
-    parser.add_argument('--n_iter', type=int, default=20,
+    parser.add_argument('--n_iter', type=int, default=5,
                         help="Number of iterations for iterative algorithms (sart, sirt, cgls). Ignored for 'fdk'. Default is 20.")
 
     parser.add_argument('--chunk_size', type=int, default=25,
