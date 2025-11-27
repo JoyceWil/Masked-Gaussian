@@ -270,37 +270,55 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.cat([self.max_radii2D, new_max_radii2D], dim=-1)
 
-    # <<< BEGIN MODIFICATION FOR STEP 2 >>>
     def densify_and_split(self, grads, grad_threshold, densify_scale_threshold, N=2,
                           guardian: StructureGuardian = None,
                           use_structure_aware_densification: bool = False,
-                          structure_densification_threshold: float = 0.5):
+                          structure_densification_threshold: float = 0.5,
+                          quota_add_global: int = None,
+                          allow_split: bool = True,
+                          guardian_for_quota: StructureGuardian = None):
+        # 如果禁用 split，直接返回
+        if not allow_split:
+            return 0, None
+
         n_init_points = self.get_xyz.shape[0]
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[: grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask &= (torch.max(self.get_scaling, dim=1).values > densify_scale_threshold)
 
-        # --- 结构感知增密逻辑 ---
+        # 结构感知“允许增密”过滤（你原逻辑）
         if guardian is not None and use_structure_aware_densification and torch.any(selected_pts_mask):
-            num_candidates_before = selected_pts_mask.sum().item()
             candidate_xyz = self.get_xyz[selected_pts_mask]
-
-            # 检查这些候选点是否在允许增密的结构区域
             permission_mask = guardian.should_densify(candidate_xyz, structure_densification_threshold)
-
-            # 更新选择掩码，只保留被允许的点
             full_permission_mask = torch.zeros_like(selected_pts_mask)
             full_permission_mask[selected_pts_mask] = permission_mask
             selected_pts_mask &= full_permission_mask
 
-            num_candidates_after = selected_pts_mask.sum().item()
-            # if num_candidates_before > 0:
-            #     print(f"Structure-Aware Split: {num_candidates_before} candidates. "
-            #           f"Permitted {num_candidates_after} in structural regions.")
-
         if not torch.any(selected_pts_mask):
-            return
+            return 0, selected_pts_mask
+
+        # 若设置了全局配额，用 guardian_for_quota 的结构先验对候选排序，截断
+        if quota_add_global is not None:
+            if quota_add_global <= 0:
+                return 0, selected_pts_mask
+            candidate_idx = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(-1)
+            # 基于结构显著性排序：优先结构强的点
+            if guardian_for_quota is not None:
+                scores, struct_mask = guardian_for_quota.get_pvol_score(self.get_xyz[candidate_idx])
+                # 如果希望严格限制在结构区域，可启用以下筛选：
+                # candidate_idx = candidate_idx[struct_mask]
+                # scores = scores[struct_mask]
+            else:
+                scores = torch.ones(candidate_idx.numel(), dtype=torch.float, device="cuda")
+            topk = min(candidate_idx.numel(), int(np.floor(quota_add_global / max(1, N))))
+            if topk <= 0:
+                return 0, selected_pts_mask
+            _, order = torch.sort(scores, descending=True)
+            keep_idx = candidate_idx[order[:topk]]
+            mask_cut = torch.zeros_like(selected_pts_mask)
+            mask_cut[keep_idx] = True
+            selected_pts_mask = mask_cut
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
@@ -313,37 +331,55 @@ class GaussianModel:
         new_max_radii2D = self.max_radii2D[selected_pts_mask].repeat(N)
 
         self.densification_postfix(new_xyz, new_density, new_scaling, new_rotation, new_max_radii2D)
+        # prune 旧点
         prune_filter = torch.cat(
             (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
+        return int(N * selected_pts_mask.sum().item()), selected_pts_mask
 
     def densify_and_clone(self, grads, grad_threshold, densify_scale_threshold,
                           guardian: StructureGuardian = None,
                           use_structure_aware_densification: bool = False,
-                          structure_densification_threshold: float = 0.5):
+                          structure_densification_threshold: float = 0.5,
+                          quota_add_global: int = None,
+                          allow_clone: bool = True,
+                          guardian_for_quota: StructureGuardian = None):
+        if not allow_clone:
+            return 0, None
+
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask &= (torch.max(self.get_scaling, dim=1).values <= densify_scale_threshold)
 
-        # --- 结构感知增密逻辑 ---
         if guardian is not None and use_structure_aware_densification and torch.any(selected_pts_mask):
-            num_candidates_before = selected_pts_mask.sum().item()
             candidate_xyz = self.get_xyz[selected_pts_mask]
-
-            # 检查这些候选点是否在允许增密的结构区域
             permission_mask = guardian.should_densify(candidate_xyz, structure_densification_threshold)
-
-            # 更新选择掩码，只保留被允许的点
             full_permission_mask = torch.zeros_like(selected_pts_mask)
             full_permission_mask[selected_pts_mask] = permission_mask
             selected_pts_mask &= full_permission_mask
 
-            num_candidates_after = selected_pts_mask.sum().item()
-            # if num_candidates_before > 0:
-            #     print(f"Structure-Aware Clone: {num_candidates_before} candidates. "
-            #           f"Permitted {num_candidates_after} in structural regions.")
-
         if not torch.any(selected_pts_mask):
-            return
+            return 0, selected_pts_mask
+
+        # 配额裁剪（每个 clone 新增1个点）
+        if quota_add_global is not None:
+            if quota_add_global <= 0:
+                return 0, selected_pts_mask
+            candidate_idx = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(-1)
+            if guardian_for_quota is not None:
+                scores, struct_mask = guardian_for_quota.get_pvol_score(self.get_xyz[candidate_idx])
+                # 如需严格限制为结构区域内：
+                # candidate_idx = candidate_idx[struct_mask]
+                # scores = scores[struct_mask]
+            else:
+                scores = torch.ones(candidate_idx.numel(), dtype=torch.float, device="cuda")
+            topk = min(candidate_idx.numel(), quota_add_global)
+            if topk <= 0:
+                return 0, selected_pts_mask
+            _, order = torch.sort(scores, descending=True)
+            keep_idx = candidate_idx[order[:topk]]
+            mask_cut = torch.zeros_like(selected_pts_mask)
+            mask_cut[keep_idx] = True
+            selected_pts_mask = mask_cut
 
         new_xyz = self._xyz[selected_pts_mask]
         new_densities = self.density_inverse_activation(self.get_density[selected_pts_mask] * 0.5)
@@ -352,8 +388,7 @@ class GaussianModel:
         new_max_radii2D = self.max_radii2D[selected_pts_mask]
         self._density[selected_pts_mask] = new_densities
         self.densification_postfix(new_xyz, new_densities, new_scaling, new_rotation, new_max_radii2D)
-
-    # <<< END MODIFICATION FOR STEP 2 >>>
+        return int(selected_pts_mask.sum().item()), selected_pts_mask
 
     def densify_and_prune(
             self,
@@ -366,26 +401,48 @@ class GaussianModel:
             bbox=None,
             guardian: StructureGuardian = None,
             structure_protection_threshold: float = 0.5,
-            # <<< BEGIN MODIFICATION FOR STEP 2 >>>
             use_structure_aware_densification: bool = False,
             structure_densification_threshold: float = 0.5,
-            # <<< END MODIFICATION FOR STEP 2 >>>
+            # === ADC new args ===
+            quota_add_global: int = None,
+            allow_split: bool = True,
+            allow_clone: bool = True,
+            guardian_for_quota: StructureGuardian = None,
     ):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
+        added = 0
         if densify_scale_threshold:
             if not max_num_gaussians or (max_num_gaussians and grads.shape[0] < max_num_gaussians):
-                # <<< BEGIN MODIFICATION FOR STEP 2 >>>
-                # 将 guardian 和相关参数传递给增密函数
-                self.densify_and_clone(grads, max_grad, densify_scale_threshold,
-                                       guardian, use_structure_aware_densification, structure_densification_threshold)
-                self.densify_and_split(grads, max_grad, densify_scale_threshold,
-                                       guardian=guardian,
-                                       use_structure_aware_densification=use_structure_aware_densification,
-                                       structure_densification_threshold=structure_densification_threshold)
-                # <<< END MODIFICATION FOR STEP 2 >>>
+                # 先 clone（细节/小半径），再 split（大半径/结构），都受同一全局配额约束
+                remaining_quota = quota_add_global if quota_add_global is not None else None
 
+                # clone
+                add_c, _ = self.densify_and_clone(
+                    grads, max_grad, densify_scale_threshold,
+                    guardian, use_structure_aware_densification, structure_densification_threshold,
+                    quota_add_global=remaining_quota,
+                    allow_clone=allow_clone,
+                    guardian_for_quota=guardian_for_quota
+                )
+                added += add_c
+                if remaining_quota is not None:
+                    remaining_quota = max(0, remaining_quota - add_c)
+
+                # split
+                add_s, _ = self.densify_and_split(
+                    grads, max_grad, densify_scale_threshold, N=2,
+                    guardian=guardian,
+                    use_structure_aware_densification=use_structure_aware_densification,
+                    structure_densification_threshold=structure_densification_threshold,
+                    quota_add_global=remaining_quota,
+                    allow_split=allow_split,
+                    guardian_for_quota=guardian_for_quota
+                )
+                added += add_s
+
+        # ---- pruning (保持原逻辑，结构保护仍然有效) ----
         density_prune_candidates_mask = (self.get_density < min_density).squeeze()
 
         if guardian is not None and torch.any(density_prune_candidates_mask):
@@ -394,12 +451,6 @@ class GaussianModel:
             full_protection_mask = torch.zeros_like(density_prune_candidates_mask, dtype=torch.bool)
             full_protection_mask[density_prune_candidates_mask] = protection_mask_for_candidates
             density_prune_mask = density_prune_candidates_mask & (~full_protection_mask)
-            num_candidates = density_prune_candidates_mask.sum().item()
-            num_protected = full_protection_mask.sum().item()
-            if num_candidates > 0:
-                # This message can be noisy, let's keep it concise
-                pass
-                # print(f"StructProtect: {num_candidates} candidates, {num_protected} protected.")
         else:
             density_prune_mask = density_prune_candidates_mask
 
@@ -407,8 +458,9 @@ class GaussianModel:
 
         if bbox is not None:
             xyz = self.get_xyz
-            prune_mask_xyz = ((xyz[:, 0] < bbox[0, 0]) | (xyz[:, 0] > bbox[1, 0]) | (xyz[:, 1] < bbox[0, 1]) | (
-                        xyz[:, 1] > bbox[1, 1]) | (xyz[:, 2] < bbox[0, 2]) | (xyz[:, 2] > bbox[1, 2]))
+            prune_mask_xyz = ((xyz[:, 0] < bbox[0, 0]) | (xyz[:, 0] > bbox[1, 0]) |
+                              (xyz[:, 1] < bbox[0, 1]) | (xyz[:, 1] > bbox[1, 1]) |
+                              (xyz[:, 2] < bbox[0, 2]) | (xyz[:, 2] > bbox[1, 2]))
             prune_mask = prune_mask | prune_mask_xyz
 
         if max_screen_size:

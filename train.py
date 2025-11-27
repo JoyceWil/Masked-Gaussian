@@ -183,6 +183,15 @@ def training(
             print("- Structure-aware densification is ACTIVE.")
     else:
         print("Structure Guardian: DISABLED.")
+
+    if getattr(opt, "adc_enable", False):
+        print("ADC (Adaptive Density Control): ENABLED")
+        print(f"  - Phase1 target ratio: [{opt.adc_phase1_target_low}, {opt.adc_phase1_target_high}] of N0")
+        print(f"  - Phase2 extra headroom: +{opt.adc_phase2_target_high_extra * 100:.1f}%")
+        print(f"  - Quota ratio per event: {opt.adc_quota_ratio * 100:.1f}%")
+        print(f"  - Phase2 freeze densify: {opt.adc_phase2_freeze_densify}")
+        print(f"  - Phase2 disable split: {opt.adc_phase2_disable_split}")
+
     print("===============================================================")
     # >>>>> 结束关键修改 <<<<<
 
@@ -214,6 +223,23 @@ def training(
         gaussians.restore(model_params, opt)
 
     bbox = bbox.to(gaussians.get_xyz.device)
+
+    # ==== ADC runtime state ====
+    adc_enabled = getattr(opt, "adc_enable", False)
+    adc_state = {
+        "N0": None,
+        "phase1_end_N": None,
+        "N_low": None,
+        "N_high": None,
+    }
+    if adc_enabled:
+        N_current = gaussians.get_density.shape[0]
+        adc_state["N0"] = N_current
+        # 初始设定 Phase1 目标区间（相对 N0）
+        adc_state["N_low"] = max(1, int(opt.adc_phase1_target_low * N_current))
+        adc_state["N_high"] = max(adc_state["N_low"] + 1, int(opt.adc_phase1_target_high * N_current))
+        print("[ADC] Enabled.")
+        print(f"[ADC] Phase1 target N in [{adc_state['N_low']}, {adc_state['N_high']}] (from N0={N_current}).")
 
     guardian = None
     if opt.use_structure_protection or opt.use_structure_aware_densification:
@@ -377,6 +403,52 @@ def training(
                     use_densify_aware = False
 
                 if (iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0):
+                    # ===== ADC global budget & phased policy =====
+                    quota_add_global = None
+                    allow_split = True
+                    allow_clone = True
+
+                    if adc_enabled:
+                        N_current = gaussians.get_density.shape[0]
+                        # 判断是否进入 Phase2（沿用你的 phase_switch_iter）
+                        in_phase2 = (opt.phase_switch_iter > 0 and iteration >= opt.phase_switch_iter)
+
+                        # 更新 Phase2 的目标区间上界（基于 Phase1 结束时点数）
+                        if in_phase2 and adc_state["phase1_end_N"] is None:
+                            adc_state["phase1_end_N"] = N_current
+                            # Phase2 低界沿用 Phase1 结束 N，High 增加少量冗余
+                            adc_state["N_low"] = adc_state["phase1_end_N"]
+                            adc_state["N_high"] = int(
+                                adc_state["phase1_end_N"] * (1.0 + opt.adc_phase2_target_high_extra))
+                            if opt.adc_verbose:
+                                tqdm.write(
+                                    f"[ADC] Enter Phase2: target N in [{adc_state['N_low']}, {adc_state['N_high']}]")
+
+                        # 计算配额
+                        if in_phase2 and opt.adc_phase2_freeze_densify:
+                            quota_add_global = 0
+                        else:
+                            # 当前点数超过上界则冻结增密，仅允许 prune
+                            if N_current >= adc_state["N_high"]:
+                                quota_add_global = 0
+                            else:
+                                # 每个事件最多新增当前点数的一定比例
+                                quota_add_global = int(max(0, min(
+                                    (adc_state["N_high"] - N_current),
+                                    opt.adc_quota_ratio * N_current
+                                )))
+                        # 模式开关
+                        if in_phase2 and opt.adc_phase2_disable_split:
+                            allow_split = False
+                        # Phase2 若冻结则 clone 也禁用
+                        if in_phase2 and opt.adc_phase2_freeze_densify:
+                            allow_clone = False
+
+                        if opt.adc_verbose:
+                            tqdm.write(f"[ADC] iter {iteration}: N={N_current}, quota={quota_add_global}, "
+                                       f"allow_split={allow_split}, allow_clone={allow_clone}")
+
+                    # 调用 densify/prune，传入 ADC 控制项
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
                         opt.density_min_threshold,
@@ -388,7 +460,12 @@ def training(
                         guardian_for_densify,
                         opt.structure_protection_threshold,
                         use_densify_aware,
-                        opt.structure_densification_threshold
+                        opt.structure_densification_threshold,
+                        # === ADC new arguments ===
+                        quota_add_global=quota_add_global if adc_enabled else None,
+                        allow_split=allow_split if adc_enabled else True,
+                        allow_clone=allow_clone if adc_enabled else True,
+                        guardian_for_quota=guardian_for_densify,  # 用结构先验做候选优先级
                     )
 
             if gaussians.get_density.shape[0] == 0:
@@ -548,6 +625,23 @@ if __name__ == "__main__":
                         help="Ratio of pixels to be sampled from important regions in Phase 2 of Scheme C.")
     parser.add_argument("--sampler_epsilon", type=float, default=1e-5,
                         help="Epsilon for numerical stability in the importance sampler of Scheme C.")
+
+    parser.add_argument("--adc_enable", action="store_true",
+                        help="Enable Adaptive Density Control (global budget + phased policies).")
+    parser.add_argument("--adc_phase1_target_low", type=float, default=0.9,
+                        help="Lower ratio of target point count w.r.t. baseline N0 in Phase 1 (relative).")
+    parser.add_argument("--adc_phase1_target_high", type=float, default=1.10,
+                        help="Upper ratio of target point count w.r.t. baseline N0 in Phase 1 (relative).")
+    parser.add_argument("--adc_phase2_target_high_extra", type=float, default=0.05,
+                        help="Extra headroom ratio over Phase1-end N for Phase 2 upper target.")
+    parser.add_argument("--adc_quota_ratio", type=float, default=0.02,
+                        help="Max fraction of current points that can be added per densification event.")
+    parser.add_argument("--adc_phase2_freeze_densify", action="store_true",
+                        help="Freeze densification in Phase 2 (only prune).")
+    parser.add_argument("--adc_phase2_disable_split", action="store_true",
+                        help="Disallow split in Phase 2 (allow clone or freeze depending on other flags).")
+    parser.add_argument("--adc_verbose", action="store_true",
+                        help="Verbose logs for ADC decisions.")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
